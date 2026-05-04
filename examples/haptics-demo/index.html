@@ -1,0 +1,78 @@
+<!--
+  haptics-demo — exercises tauri-plugin-haptics on Android and iOS.
+
+  Build:
+      cd examples/haptics-demo
+      cargo run --manifest-path ../../Cargo.toml -- index.html -p android
+      cargo run --manifest-path ../../Cargo.toml -- index.html -p ios
+
+  Notes:
+    - `vibrate(duration)` uses the duration arg on Android; iOS plays a
+      fixed-length system haptic (the duration is ignored on iOS).
+    - `impactFeedback`, `notificationFeedback`, `selectionFeedback` use the
+      iOS Taptic Engine on iPhone 7+ and the Android haptic-feedback API.
+    - On desktop the plugin isn't loaded; calls will throw with
+      "plugin haptics not loaded". The UI surfaces that as an error.
+-->
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Haptics Demo</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <main>
+      <h1>Haptics Demo</h1>
+      <p class="sub">Tap a button to trigger feedback. Status appears below each row.</p>
+
+      <section>
+        <h2>Vibrate</h2>
+        <p class="hint">Plain vibration. Duration in ms (Android only; iOS ignores).</p>
+        <div class="row">
+          <button data-cmd="vibrate" data-arg="50">50 ms</button>
+          <button data-cmd="vibrate" data-arg="200">200 ms</button>
+          <button data-cmd="vibrate" data-arg="500">500 ms</button>
+        </div>
+      </section>
+
+      <section>
+        <h2>Impact feedback</h2>
+        <p class="hint">Discrete tap-style feedback at varying strengths.</p>
+        <div class="row">
+          <button data-cmd="impactFeedback" data-arg="light">light</button>
+          <button data-cmd="impactFeedback" data-arg="medium">medium</button>
+          <button data-cmd="impactFeedback" data-arg="heavy">heavy</button>
+          <button data-cmd="impactFeedback" data-arg="soft">soft</button>
+          <button data-cmd="impactFeedback" data-arg="rigid">rigid</button>
+        </div>
+      </section>
+
+      <section>
+        <h2>Notification feedback</h2>
+        <p class="hint">Multi-pulse pattern conveying outcome.</p>
+        <div class="row">
+          <button data-cmd="notificationFeedback" data-arg="success">success</button>
+          <button data-cmd="notificationFeedback" data-arg="warning">warning</button>
+          <button data-cmd="notificationFeedback" data-arg="error">error</button>
+        </div>
+      </section>
+
+      <section>
+        <h2>Selection feedback</h2>
+        <p class="hint">Subtle tick used while scrolling pickers / toggles.</p>
+        <div class="row">
+          <button data-cmd="selectionFeedback">tick</button>
+        </div>
+      </section>
+
+      <section>
+        <h2>Status</h2>
+        <pre id="status">ready</pre>
+      </section>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>
