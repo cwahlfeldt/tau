@@ -8,7 +8,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command};
 use walkdir::WalkDir;
 
 use crate::cache;
@@ -129,13 +129,19 @@ impl<'a> TauriCmd<'a> {
         self.run(build, &format!("cargo tauri {} build", sub))
     }
 
-    pub(crate) fn dev_desktop(&self) -> Result<()> {
+    /// Spawn `cargo tauri dev` and return the child handle so the caller
+    /// can run a filesystem watcher (or any other concurrent work)
+    /// alongside the long-lived dev process. Stdio is inherited.
+    pub(crate) fn spawn_dev_desktop(&self) -> Result<Child> {
         let mut cmd = self.cargo();
         cmd.args(["tauri", "dev"]);
-        self.run(cmd, "cargo tauri dev")
+        self.log.command("cargo tauri dev");
+        cmd.spawn().with_context(|| "failed to spawn: cargo tauri dev".to_string())
     }
 
-    pub(crate) fn dev_mobile(&self, flavor: MobileFlavor) -> Result<()> {
+    /// Same as `spawn_dev_desktop` but for mobile. The synchronous `init`
+    /// step still runs to completion before returning the spawned dev child.
+    pub(crate) fn spawn_dev_mobile(&self, flavor: MobileFlavor) -> Result<Child> {
         let sub = flavor.subcommand();
 
         let mut init = self.cargo();
@@ -144,7 +150,9 @@ impl<'a> TauriCmd<'a> {
 
         let mut dev = self.cargo();
         dev.args(["tauri", sub, "dev"]);
-        self.run(dev, &format!("cargo tauri {} dev", sub))
+        let label = format!("cargo tauri {} dev", sub);
+        self.log.command(&label);
+        dev.spawn().with_context(|| format!("failed to spawn: {}", label))
     }
 }
 

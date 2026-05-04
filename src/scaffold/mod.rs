@@ -33,6 +33,13 @@ const PLUGIN_FS_JS: &[u8] = include_bytes!("templates/plugins/fs.iife.js");
 const PLUGIN_DIALOG_JS: &[u8] = include_bytes!("templates/plugins/dialog.iife.js");
 const PLUGIN_HAPTICS_JS: &[u8] = include_bytes!("templates/plugins/haptics.iife.js");
 
+const LIVERELOAD_JS: &[u8] = include_bytes!("templates/livereload.js");
+
+/// File polled by the dev-only livereload IIFE. The `tau dev` watcher
+/// rewrites this with a fresh integer after each scaffold refresh; the
+/// JS sees the change and reloads the webview.
+pub const RELOAD_TOKEN_FILE: &str = "reload-token";
+
 /// Plugin IIFE bundles emitted into `dist/__tauri/` and loaded by injected
 /// `<script>` tags in the wrapped app's `<head>`. Filenames here MUST match
 /// the script tags injected by `discover::PLUGIN_HEAD_INJECTION`.
@@ -43,6 +50,16 @@ const PLUGIN_BUNDLES: &[(&str, &[u8])] = &[
 ];
 
 const PLUGIN_DIR_NAME: &str = "__tauri";
+
+/// Path to the dev-only reload token file inside a generated scaffold.
+/// `tau dev` rewrites this to bump the watcher; the injected livereload
+/// IIFE polls it.
+pub fn reload_token_path(project_dir: &Path) -> PathBuf {
+    project_dir
+        .join("dist")
+        .join(PLUGIN_DIR_NAME)
+        .join(RELOAD_TOKEN_FILE)
+}
 
 /// All paths inside the generated scaffold, derived once from the project root.
 struct Layout {
@@ -85,18 +102,40 @@ impl Layout {
 }
 
 pub fn create(project_dir: &Path, cfg: &Config, discovered: &Discovered) -> Result<()> {
+    create_with_mode(project_dir, cfg, discovered, false)
+}
+
+pub fn create_with_mode(
+    project_dir: &Path,
+    cfg: &Config,
+    discovered: &Discovered,
+    dev_mode: bool,
+) -> Result<()> {
     let layout = Layout::new(project_dir);
     layout.ensure_dirs()?;
 
-    write_frontend(&layout, discovered)?;
+    write_frontend(&layout, discovered, dev_mode)?;
     write_src_tauri(&layout, cfg)?;
     Ok(())
 }
 
-fn write_frontend(layout: &Layout, discovered: &Discovered) -> Result<()> {
+/// Rewrite `dist/` (index.html, user assets, plugin bundles, and the
+/// dev-only livereload bits) for an existing scaffold. Used by `tau dev`
+/// to refresh the webview's source on filesystem changes without
+/// regenerating the Rust crate.
+pub fn refresh_frontend(
+    project_dir: &Path,
+    discovered: &Discovered,
+    dev_mode: bool,
+) -> Result<()> {
+    let layout = Layout::new(project_dir);
+    write_frontend(&layout, discovered, dev_mode)
+}
+
+fn write_frontend(layout: &Layout, discovered: &Discovered, dev_mode: bool) -> Result<()> {
     write_bytes(&layout.dist.join("index.html"), &discovered.index_html)?;
     copy_assets(&layout.dist, discovered)?;
-    write_plugin_bundles(&layout.plugins)?;
+    write_plugin_bundles(&layout.plugins, dev_mode)?;
     Ok(())
 }
 
@@ -119,9 +158,12 @@ fn write_src_tauri(layout: &Layout, cfg: &Config) -> Result<()> {
     Ok(())
 }
 
-fn write_plugin_bundles(plugin_dir: &Path) -> Result<()> {
+fn write_plugin_bundles(plugin_dir: &Path, dev_mode: bool) -> Result<()> {
     for (filename, bytes) in PLUGIN_BUNDLES {
         write_bytes(&plugin_dir.join(filename), bytes)?;
+    }
+    if dev_mode {
+        write_bytes(&plugin_dir.join("livereload.js"), LIVERELOAD_JS)?;
     }
     Ok(())
 }

@@ -59,6 +59,19 @@ const PLUGIN_HEAD_INJECTION: &str = concat!(
     "<script src=\"./__tauri/haptics.js\"></script>",
 );
 
+/// Extra script tag injected only in dev mode. Polls a marker file in
+/// `dist/__tauri/reload-token` and reloads the webview when its contents
+/// change. The token file is bumped by `dev` after each scaffold refresh.
+const LIVERELOAD_INJECTION: &str = "<script src=\"./__tauri/livereload.js\"></script>";
+
+fn head_injection(dev_mode: bool) -> String {
+    let mut s = String::from(PLUGIN_HEAD_INJECTION);
+    if dev_mode {
+        s.push_str(LIVERELOAD_INJECTION);
+    }
+    s
+}
+
 /// Shared, mutable accumulator for raw asset references collected during the
 /// `lol_html` pass. The `'static` element handlers force interior mutability.
 type RefSink = Rc<RefCell<Vec<String>>>;
@@ -75,11 +88,20 @@ fn push_ref(sink: &RefSink, value: impl Into<String>) {
 /// rewritten to relative form so Tauri resolves them inside the bundled
 /// `frontendDist`.
 pub fn discover(index_path: &Path, source_root: &Path, cfg: &Config) -> Result<Discovered> {
+    discover_with_mode(index_path, source_root, cfg, false)
+}
+
+pub fn discover_with_mode(
+    index_path: &Path,
+    source_root: &Path,
+    cfg: &Config,
+    dev_mode: bool,
+) -> Result<Discovered> {
     let html_bytes = std::fs::read(index_path)
         .with_context(|| format!("read failed: {}", index_path.display()))?;
 
     let sink = new_sink();
-    let rewritten = rewrite_html(&html_bytes, &sink)?;
+    let rewritten = rewrite_html(&html_bytes, &sink, dev_mode)?;
     let raw_refs = sink.take();
 
     let mut assets = resolve_references(&raw_refs, source_root);
@@ -92,10 +114,10 @@ pub fn discover(index_path: &Path, source_root: &Path, cfg: &Config) -> Result<D
     })
 }
 
-fn rewrite_html(html_bytes: &[u8], sink: &RefSink) -> Result<Vec<u8>> {
+fn rewrite_html(html_bytes: &[u8], sink: &RefSink, dev_mode: bool) -> Result<Vec<u8>> {
     let injected = Rc::new(RefCell::new(false));
     let selectors = build_selectors()?;
-    let handlers = build_handlers(sink, &injected);
+    let handlers = build_handlers(sink, &injected, dev_mode);
 
     let element_content_handlers: Vec<(Cow<'_, Selector>, ElementContentHandlers<'_>)> = selectors
         .iter()
@@ -117,7 +139,8 @@ fn rewrite_html(html_bytes: &[u8], sink: &RefSink) -> Result<Vec<u8>> {
     // Fallback for HTML without a literal <head> (lol_html doesn't synthesize
     // one). Browsers will fold a leading <script> into a synthetic head.
     if !*injected.borrow() {
-        let mut prefixed = PLUGIN_HEAD_INJECTION.as_bytes().to_vec();
+        let inj = head_injection(dev_mode);
+        let mut prefixed = inj.into_bytes();
         prefixed.extend_from_slice(&out);
         out = prefixed;
     }
@@ -140,6 +163,7 @@ fn build_selectors() -> Result<Vec<Selector>> {
 fn build_handlers(
     sink: &RefSink,
     injected: &Rc<RefCell<bool>>,
+    dev_mode: bool,
 ) -> Vec<ElementContentHandlers<'static>> {
     let mut handlers = Vec::with_capacity(ATTR_TARGETS.len() + SRCSET_TARGETS.len() + 2);
     for (_, attr) in ATTR_TARGETS {
@@ -149,7 +173,7 @@ fn build_handlers(
         handlers.push(srcset_handler(sink.clone()));
     }
     handlers.push(style_handler(sink.clone()));
-    handlers.push(head_injection_handler(injected.clone()));
+    handlers.push(head_injection_handler(injected.clone(), dev_mode));
     handlers
 }
 
@@ -189,9 +213,13 @@ fn srcset_handler(sink: RefSink) -> ElementContentHandlers<'static> {
     })
 }
 
-fn head_injection_handler(injected: Rc<RefCell<bool>>) -> ElementContentHandlers<'static> {
+fn head_injection_handler(
+    injected: Rc<RefCell<bool>>,
+    dev_mode: bool,
+) -> ElementContentHandlers<'static> {
+    let inj = head_injection(dev_mode);
     ElementContentHandlers::default().element(move |el: &mut Element| -> Result<(), HandlerError> {
-        el.prepend(PLUGIN_HEAD_INJECTION, ContentType::Html);
+        el.prepend(&inj, ContentType::Html);
         *injected.borrow_mut() = true;
         Ok(())
     })
@@ -412,11 +440,12 @@ mod tests {
     fn injects_plugin_scripts_into_head() {
         let html = b"<!doctype html><html><head><title>x</title></head><body></body></html>";
         let sink = new_sink();
-        let out = rewrite_html(html, &sink).unwrap();
+        let out = rewrite_html(html, &sink, false).unwrap();
         let s = std::str::from_utf8(&out).unwrap();
         assert!(s.contains(r#"<script src="./__tauri/fs.js"></script>"#));
         assert!(s.contains(r#"<script src="./__tauri/dialog.js"></script>"#));
         assert!(s.contains(r#"<script src="./__tauri/haptics.js"></script>"#));
+        assert!(!s.contains("livereload.js"));
         let plug_idx = s.find("__tauri/fs.js").unwrap();
         let title_idx = s.find("<title>").unwrap();
         assert!(plug_idx < title_idx, "plugin scripts must precede <title>");
@@ -426,10 +455,22 @@ mod tests {
     fn injects_when_head_missing() {
         let html = b"<!doctype html><html><body></body></html>";
         let sink = new_sink();
-        let out = rewrite_html(html, &sink).unwrap();
+        let out = rewrite_html(html, &sink, false).unwrap();
         let s = std::str::from_utf8(&out).unwrap();
         assert!(s.contains("__tauri/fs.js"));
         assert!(s.contains("__tauri/dialog.js"));
         assert!(s.contains("__tauri/haptics.js"));
+    }
+
+    #[test]
+    fn injects_livereload_only_in_dev_mode() {
+        let html = b"<!doctype html><html><head></head><body></body></html>";
+        let sink = new_sink();
+        let dev = rewrite_html(html, &sink, true).unwrap();
+        assert!(std::str::from_utf8(&dev).unwrap().contains("__tauri/livereload.js"));
+
+        let sink = new_sink();
+        let prod = rewrite_html(html, &sink, false).unwrap();
+        assert!(!std::str::from_utf8(&prod).unwrap().contains("livereload.js"));
     }
 }

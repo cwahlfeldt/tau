@@ -6,13 +6,17 @@
     <link rel="stylesheet" href="/css/main.css" />
     <link rel="icon" href="assets/favicon.png" />
     <style>
-      body { background: url("/assets/bg.png") repeat; }
-      .hero { background-image: url(assets/hero.png); }
+      body {
+        background: url("/assets/bg.png") repeat;
+      }
+      .hero {
+        background-image: url(assets/hero.png);
+      }
     </style>
     <script src="https://cdn.example.com/external.js"></script>
   </head>
   <body>
-    <h1>Hello, tau!</h1>
+    <h1>ok, tau!</h1>
     <img src="/assets/logo.png" alt="logo" />
     <img srcset="assets/small.png 1x, /assets/large.png 2x" />
     <h2>Tauri runtime probe</h2>
@@ -20,15 +24,19 @@
     <script>
       addEventListener("DOMContentLoaded", () => {
         const t = window.__TAURI__ || {};
-        document.getElementById("tauri-probe").textContent = JSON.stringify({
-          hasCore: !!(t.core && t.core.invoke),
-          hasEvent: !!t.event,
-          hasPath: !!t.path,
-          hasFs: !!window.__TAURI_PLUGIN_FS__,
-          hasDialog: !!window.__TAURI_PLUGIN_DIALOG__,
-          hasHaptics: !!window.__TAURI_PLUGIN_HAPTICS__,
-          tauriKeys: Object.keys(t),
-        }, null, 2);
+        document.getElementById("tauri-probe").textContent = JSON.stringify(
+          {
+            hasCore: !!(t.core && t.core.invoke),
+            hasEvent: !!t.event,
+            hasPath: !!t.path,
+            hasFs: !!window.__TAURI_PLUGIN_FS__,
+            hasDialog: !!window.__TAURI_PLUGIN_DIALOG__,
+            hasHaptics: !!window.__TAURI_PLUGIN_HAPTICS__,
+            tauriKeys: Object.keys(t),
+          },
+          null,
+          2,
+        );
       });
     </script>
     <script src="js/app.js"></script>
