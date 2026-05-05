@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Configured Demo</title>
+    <link rel="stylesheet" href="./css/main.css" />
+  </head>
+  <body>
+    <main>
+      <h1 id="title">Loading…</h1>
+      <p class="lede">
+        This page is wrapped by <code>tau</code>. Everything below is read
+        from the surrounding <code>tau.conf.json</code> at build time, or
+        from files bundled via the <code>include</code> glob.
+      </p>
+
+      <section>
+        <h2>Identity (from <code>tau.conf.json</code>)</h2>
+        <dl id="identity">
+          <dt>productName</dt><dd id="conf-name">…</dd>
+          <dt>identifier</dt><dd id="conf-id">…</dd>
+          <dt>version</dt><dd id="conf-version">…</dd>
+        </dl>
+      </section>
+
+      <section>
+        <h2><code>include</code> glob</h2>
+        <p>
+          <code>data/notes.json</code> is <em>never</em> referenced from this
+          HTML, but it ships with the bundle because the config has
+          <code>"include": ["data/**", "fonts/*.woff2"]</code>. The list below
+          is fetched at runtime to prove it.
+        </p>
+        <ul id="notes"><li>fetching…</li></ul>
+      </section>
+    </main>
+    <script src="./js/app.js"></script>
+  </body>
+</html>

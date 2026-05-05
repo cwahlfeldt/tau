@@ -1,0 +1,5 @@
+[
+  "This file is shipped via the `include` glob in tau.conf.json.",
+  "Nothing in index.html references it directly — `tau` would have skipped it without the glob.",
+  "Useful for: data files, JSON configs, fonts, audio samples, anything fetched at runtime."
+]

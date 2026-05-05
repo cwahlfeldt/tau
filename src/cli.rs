@@ -4,18 +4,20 @@ use std::path::PathBuf;
 use crate::log::Level;
 
 /// Top-level CLI. The default (subcommand-less) invocation wraps an
-/// `index.html` — this preserves the original `tau <index>` form.
-/// Subcommands are reserved for adjacent operations (e.g. `cache`).
+/// `index.html` (or remote URL) — this preserves the original
+/// `tau <index>` form. Subcommands are reserved for adjacent operations
+/// (e.g. `cache`).
 #[derive(Parser, Debug)]
 #[command(
     name = "tau",
     version,
-    about = "Wrap a web app into a mobile or desktop app by pointing at index.html",
+    about = "Wrap a local index.html or a remote URL into a desktop or mobile app",
     subcommand_negates_reqs = true,
     args_conflicts_with_subcommands = true
 )]
 pub struct Cli {
-    /// Path to the entry index.html (required when not using a subcommand)
+    /// Path to a local index.html, or an http(s) URL to wrap directly
+    /// (required when not using a subcommand)
     pub index: Option<PathBuf>,
 
     /// Build a signed release (requires tau.conf.json with signing keys)
@@ -83,7 +85,7 @@ pub enum Command {
     },
     /// Run `cargo tauri dev` against a freshly-scaffolded project for fast iteration.
     Dev {
-        /// Path to the entry index.html
+        /// Path to a local index.html, or an http(s) URL to wrap directly
         index: PathBuf,
 
         /// Single target platform: macos, windows, linux, android, ios. Defaults to host.

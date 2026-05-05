@@ -81,8 +81,16 @@ struct BuildSection {
     platforms: Option<Vec<String>>,
 }
 
-pub fn resolve(cwd: &Path, cli: &Cli) -> Result<Config> {
-    let file = load_file_config(cwd, cli.config.as_deref())?;
+/// Resolve the layered config: CLI flags > `tau.conf.json` > defaults.
+///
+/// `index_dir` is the directory of the input `index.html` for local-file
+/// inputs, or `None` for URL inputs. When `--config` isn't given, the
+/// sibling `tau.conf.json` next to the index file beats the cwd's — the
+/// config travels with the app it configures, so running
+/// `tau path/to/some-app/index.html` from another directory still picks
+/// up the project's own conf.
+pub fn resolve(cwd: &Path, index_dir: Option<&Path>, cli: &Cli) -> Result<Config> {
+    let file = load_file_config(cwd, index_dir, cli.config.as_deref())?;
     let build = file.build.unwrap_or_default();
 
     let name = cli
@@ -141,21 +149,40 @@ fn resolve_profile(release: bool, signing: Option<SigningConfig>) -> Result<Buil
     Ok(BuildProfile::Release(signing))
 }
 
-fn load_file_config(cwd: &Path, explicit: Option<&Path>) -> Result<FileConfig> {
+fn load_file_config(
+    cwd: &Path,
+    index_dir: Option<&Path>,
+    explicit: Option<&Path>,
+) -> Result<FileConfig> {
     let path = match explicit {
         Some(p) => p.to_path_buf(),
-        None => {
-            let default = cwd.join(DEFAULT_CONFIG_FILE);
-            if !default.exists() {
-                return Ok(FileConfig::default());
-            }
-            default
-        }
+        None => match discover_config(cwd, index_dir) {
+            Some(p) => p,
+            None => return Ok(FileConfig::default()),
+        },
     };
     let raw = std::fs::read_to_string(&path)
         .with_context(|| format!("failed to read config: {}", path.display()))?;
     serde_json::from_str(&raw)
         .with_context(|| format!("failed to parse config: {}", path.display()))
+}
+
+/// Search order for `tau.conf.json` when `--config` isn't given:
+/// 1. Next to the input `index.html` (most specific to this app).
+/// 2. The current working directory (kept for back-compat with the
+///    "I'm already standing in the project" workflow).
+fn discover_config(cwd: &Path, index_dir: Option<&Path>) -> Option<PathBuf> {
+    if let Some(dir) = index_dir {
+        let candidate = dir.join(DEFAULT_CONFIG_FILE);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    let candidate = cwd.join(DEFAULT_CONFIG_FILE);
+    if candidate.exists() {
+        return Some(candidate);
+    }
+    None
 }
 
 fn default_identifier(name: &str) -> String {
@@ -183,5 +210,48 @@ mod tests {
     fn build_profile_dir_name() {
         assert_eq!(BuildProfile::Debug.dir_name(), "debug");
         assert_eq!(BuildProfile::Release(SigningConfig::default()).dir_name(), "release");
+    }
+
+    #[test]
+    fn discover_prefers_index_dir_over_cwd() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path().join("cwd");
+        let app = tmp.path().join("app");
+        std::fs::create_dir(&cwd).unwrap();
+        std::fs::create_dir(&app).unwrap();
+        std::fs::write(cwd.join(DEFAULT_CONFIG_FILE), "{}").unwrap();
+        std::fs::write(app.join(DEFAULT_CONFIG_FILE), "{}").unwrap();
+
+        assert_eq!(
+            discover_config(&cwd, Some(&app)).unwrap(),
+            app.join(DEFAULT_CONFIG_FILE)
+        );
+    }
+
+    #[test]
+    fn discover_falls_back_to_cwd_when_index_dir_has_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path().join("cwd");
+        let app = tmp.path().join("app");
+        std::fs::create_dir(&cwd).unwrap();
+        std::fs::create_dir(&app).unwrap();
+        std::fs::write(cwd.join(DEFAULT_CONFIG_FILE), "{}").unwrap();
+
+        assert_eq!(
+            discover_config(&cwd, Some(&app)).unwrap(),
+            cwd.join(DEFAULT_CONFIG_FILE)
+        );
+    }
+
+    #[test]
+    fn discover_returns_none_when_neither_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path().join("cwd");
+        let app = tmp.path().join("app");
+        std::fs::create_dir(&cwd).unwrap();
+        std::fs::create_dir(&app).unwrap();
+
+        assert!(discover_config(&cwd, Some(&app)).is_none());
+        assert!(discover_config(&cwd, None).is_none());
     }
 }

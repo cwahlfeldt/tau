@@ -115,9 +115,27 @@ pub fn create_with_mode(
     layout.ensure_dirs()?;
 
     write_frontend(&layout, discovered, dev_mode)?;
-    write_src_tauri(&layout, cfg)?;
+    write_src_tauri(&layout, cfg, None)?;
     Ok(())
 }
+
+/// Scaffold a Tauri project whose webview points at a remote URL instead
+/// of a local `index.html`. No asset discovery, no plugin injection —
+/// the page is loaded over the network.
+///
+/// We still write a placeholder `dist/index.html` because Tauri's bundler
+/// requires `frontendDist` to exist at build time. It's never actually
+/// shown: `app.windows[0].url` overrides it.
+pub fn create_for_url(project_dir: &Path, cfg: &Config, url: &str) -> Result<()> {
+    let layout = Layout::new(project_dir);
+    layout.ensure_dirs()?;
+
+    write_bytes(&layout.dist.join("index.html"), URL_STUB_HTML.as_bytes())?;
+    write_src_tauri(&layout, cfg, Some(url))?;
+    Ok(())
+}
+
+const URL_STUB_HTML: &str = "<!doctype html><meta charset=\"utf-8\"><title>tau</title>";
 
 /// Rewrite `dist/` (index.html, user assets, plugin bundles, and the
 /// dev-only livereload bits) for an existing scaffold. Used by `tau dev`
@@ -139,7 +157,7 @@ fn write_frontend(layout: &Layout, discovered: &Discovered, dev_mode: bool) -> R
     Ok(())
 }
 
-fn write_src_tauri(layout: &Layout, cfg: &Config) -> Result<()> {
+fn write_src_tauri(layout: &Layout, cfg: &Config, window_url: Option<&str>) -> Result<()> {
     // The wrapped crate uses a fixed name (`tau_app`) so artifacts in
     // the shared CARGO_TARGET_DIR can be reused across different wrapped apps.
     // Per-app branding lives in `tauri.conf.json` (`productName`/`identifier`),
@@ -151,7 +169,7 @@ fn write_src_tauri(layout: &Layout, cfg: &Config) -> Result<()> {
     write_text(&layout.src_tauri.join("build.rs"), BUILD_TMPL)?;
     write_text(&layout.src_tauri_src.join("main.rs"), MAIN_TMPL)?;
     write_text(&layout.src_tauri_src.join("lib.rs"), LIB_TMPL)?;
-    write_json(&layout.src_tauri.join("tauri.conf.json"), &tauri_conf(cfg))?;
+    write_json(&layout.src_tauri.join("tauri.conf.json"), &tauri_conf(cfg, window_url))?;
     write_json(&layout.capabilities.join("default.json"), &default_capability())?;
     write_json(&layout.capabilities.join("mobile.json"), &mobile_capability())?;
     write_bytes(&layout.icons.join("icon.png"), ICON_PNG)?;
@@ -216,10 +234,21 @@ fn render(template: &str, vars: &[(&str, &str)]) -> String {
     out
 }
 
-fn tauri_conf(cfg: &Config) -> Value {
+fn tauri_conf(cfg: &Config, window_url: Option<&str>) -> Value {
     // Skip installer formats (dmg/msi/etc.) — we only want the runnable app.
     // The dmg bundler in particular spawns bundle_dmg.sh which mounts and
     // opens a disk image, which is intrusive.
+    let mut window = json!({
+        "label": "main",
+        "title": cfg.name,
+        "width": 1024,
+        "height": 768,
+        "resizable": true,
+        "fullscreen": false
+    });
+    if let Some(url) = window_url {
+        window["url"] = Value::String(url.to_string());
+    }
     json!({
         "$schema": "https://schema.tauri.app/config/2",
         "productName": cfg.name,
@@ -227,14 +256,7 @@ fn tauri_conf(cfg: &Config) -> Value {
         "identifier": cfg.identifier,
         "build": { "frontendDist": "../dist" },
         "app": {
-            "windows": [{
-                "label": "main",
-                "title": cfg.name,
-                "width": 1024,
-                "height": 768,
-                "resizable": true,
-                "fullscreen": false
-            }],
+            "windows": [window],
             "security": { "csp": null },
             "withGlobalTauri": true
         },
@@ -335,8 +357,25 @@ mod tests {
             platforms: vec![],
             profile: BuildProfile::Debug,
         };
-        let v = tauri_conf(&cfg);
+        let v = tauri_conf(&cfg, None);
         assert_eq!(v["app"]["withGlobalTauri"], serde_json::json!(true));
+        assert!(v["app"]["windows"][0].get("url").is_none());
+    }
+
+    #[test]
+    fn tauri_conf_sets_window_url_for_remote_wrap() {
+        use crate::config::{BuildProfile, Config};
+        let cfg = Config {
+            name: "X".into(),
+            version: "0.1.0".into(),
+            identifier: "com.x".into(),
+            include: vec![],
+            output: ".".into(),
+            platforms: vec![],
+            profile: BuildProfile::Debug,
+        };
+        let v = tauri_conf(&cfg, Some("https://example.com"));
+        assert_eq!(v["app"]["windows"][0]["url"], serde_json::json!("https://example.com"));
     }
 
     #[test]

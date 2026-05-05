@@ -1,9 +1,9 @@
 # tau
 
-Wrap a static web app into a desktop or mobile app by pointing at its `index.html`.
-No persistent project, no manual Tauri scaffolding — `tau` generates a minimal
-Tauri v2 project on the fly, builds it, and drops the resulting binaries into
-`./build/`.
+Wrap a static web app — or a remote URL — into a desktop or mobile app by
+pointing at its `index.html` or http(s) link. No persistent project, no
+manual Tauri scaffolding — `tau` generates a minimal Tauri v2 project on
+the fly, builds it, and drops the resulting binaries into `./build/`.
 
 ## Install
 
@@ -23,8 +23,11 @@ You'll also need:
 ### Build a bundle
 
 ```bash
-# Host platform, debug profile, output in ./build/
+# Local file: host platform, debug profile, output in ./build/
 tau examples/sample-app/index.html
+
+# Remote URL: same flags, just point at an http(s) URL
+tau https://example.com --name "Example" --identifier com.example.app
 
 # Multiple desktop targets
 tau examples/sample-app/index.html -p macos,windows,linux
@@ -39,6 +42,10 @@ tau examples/sample-app/index.html --name "My App" --identifier com.example.myap
 # Inspect the generated scaffold without building
 tau examples/sample-app/index.html --dry-run
 ```
+
+URL wraps skip asset discovery — the wrapped webview just navigates to
+the URL. No Tauri JS APIs are injected (no `window.__TAURI__`). Use a
+local file if you need plugin bridges or offline asset bundling.
 
 ### Hot-reload dev loop
 

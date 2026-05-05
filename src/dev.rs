@@ -22,6 +22,7 @@ use crate::cache;
 use crate::cli::Cli;
 use crate::config::{self, Config, Platform};
 use crate::discover;
+use crate::input::Input;
 use crate::log::{Level, Logger};
 use crate::scaffold;
 
@@ -53,57 +54,70 @@ pub fn run(args: DevArgs) -> Result<()> {
 
     let platform = resolve_platform(args.platform.as_deref())?;
 
-    let index_path = std::fs::canonicalize(&args.index)
-        .with_context(|| format!("index.html not found: {}", args.index.display()))?;
-    let source_root = index_path
-        .parent()
-        .context("could not determine source root from index.html path")?
-        .to_path_buf();
+    let raw = args
+        .index
+        .to_str()
+        .context("index argument is not valid UTF-8")?;
+    let input = Input::parse(raw)?;
 
     let synthetic = synthesize_cli(&args, platform);
     let cwd = std::env::current_dir()?;
-    let mut cfg = config::resolve(&cwd, &synthetic)?;
+    let index_dir = match &input {
+        Input::File { source_root, .. } => Some(source_root.as_path()),
+        Input::Url(_) => None,
+    };
+    let mut cfg = config::resolve(&cwd, index_dir, &synthetic)?;
     cfg.platforms = vec![platform];
 
     log.heading("tau dev");
     log.detail("app", &cfg.name);
     log.detail("identifier", &cfg.identifier);
-    log.detail("source", &source_root.display().to_string());
+    log.detail("source", &input.label());
     log.detail("platform", platform.as_str());
-
-    let discovered = discover::discover_with_mode(&index_path, &source_root, &cfg, true)?;
-    log.detail("assets", &format!("{} files", discovered.assets.len()));
 
     let workdir = tempfile::Builder::new()
         .prefix("tau-dev-")
         .tempdir()
         .context("failed to create temp working directory")?;
     let project_dir = workdir.path().to_path_buf();
-    scaffold::create_with_mode(&project_dir, &cfg, &discovered, true)?;
-    log.detail("scaffold", &project_dir.display().to_string());
 
-    // Seed the reload token so the injected IIFE has something to poll.
-    let token_path = scaffold::reload_token_path(&project_dir);
-    write_token(&token_path, 0)?;
+    // Optional watcher handle — only set for File inputs. URL inputs have
+    // nothing local to watch.
+    let mut watcher_state: Option<(Arc<Mutex<bool>>, thread::JoinHandle<()>)> = None;
+
+    match &input {
+        Input::File { index_path, source_root } => {
+            let discovered =
+                discover::discover_with_mode(index_path, source_root, &cfg, true)?;
+            log.detail("assets", &format!("{} files", discovered.assets.len()));
+            scaffold::create_with_mode(&project_dir, &cfg, &discovered, true)?;
+            log.detail("scaffold", &project_dir.display().to_string());
+
+            let token_path = scaffold::reload_token_path(&project_dir);
+            write_token(&token_path, 0)?;
+
+            let stop = Arc::new(Mutex::new(false));
+            let handle = spawn_watcher(
+                source_root.clone(),
+                index_path.clone(),
+                project_dir.clone(),
+                cfg.clone(),
+                token_path,
+                stop.clone(),
+                log.clone(),
+            )?;
+            watcher_state = Some((stop, handle));
+        }
+        Input::Url(url) => {
+            scaffold::create_for_url(&project_dir, &cfg, url)?;
+            log.detail("scaffold", &project_dir.display().to_string());
+        }
+    }
 
     ensure_targets(platform, &log)?;
 
     let target_dir = cache::dir()?;
     log.detail("cache", &target_dir.display().to_string());
-
-    // Spawn the watcher *before* the dev process so the user's first edit
-    // during the cargo build is still picked up.
-    let watcher_log = log.clone();
-    let stop = Arc::new(Mutex::new(false));
-    let watch_handle = spawn_watcher(
-        source_root.clone(),
-        index_path.clone(),
-        project_dir.clone(),
-        cfg.clone(),
-        token_path,
-        stop.clone(),
-        watcher_log,
-    )?;
 
     let tauri = TauriCmd::new(&project_dir, &target_dir, &log);
     let mut child = match MobileFlavor::from_platform(platform) {
@@ -112,12 +126,13 @@ pub fn run(args: DevArgs) -> Result<()> {
     };
 
     // Block on the dev process. When the user Ctrl-Cs, the child exits
-    // and we tear down the watcher.
+    // and we tear down the watcher (if any).
     let status = child.wait().context("failed to wait on cargo tauri dev")?;
 
-    // Signal the watcher to stop and join.
-    *stop.lock().unwrap() = true;
-    let _ = watch_handle.join();
+    if let Some((stop, handle)) = watcher_state {
+        *stop.lock().unwrap() = true;
+        let _ = handle.join();
+    }
 
     if args.keep_scaffold {
         let kept = workdir.keep();

@@ -4,6 +4,7 @@ mod cli;
 mod config;
 mod dev;
 mod discover;
+mod input;
 mod log;
 mod pipeline;
 mod scaffold;
