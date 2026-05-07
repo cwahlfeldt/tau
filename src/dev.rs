@@ -114,6 +114,7 @@ fn synthesize_cli(args: &DevArgs, platform: Platform) -> Cli {
     Cli {
         index: None,
         release: false,
+        no_tree_shake: false,
         platform: vec![platform.as_str().to_string()],
         name: args.name.clone(),
         identifier: args.identifier.clone(),

@@ -121,6 +121,16 @@ impl<'a> TauriCmd<'a> {
         init.args(["tauri", sub, "init"]);
         self.run(init, &format!("cargo tauri {} init", sub))?;
 
+        // Tauri's generated Android Gradle script leaves the `release`
+        // buildType unsigned. Without a signature `adb install` rejects
+        // the APK ("Failed to collect certificates"). For local sideload
+        // testing we sign the release build with the standard Android
+        // debug keystore — same way debug builds are auto-signed. Real
+        // distribution still needs a proper keystore (a future feature).
+        if matches!(flavor, MobileFlavor::Android) && cfg.profile.is_release() {
+            crate::signing::patch_android_release_signing(self.project_dir, self.log)?;
+        }
+
         let mut build = self.cargo();
         build.args(["tauri", sub, "build"]);
         if !cfg.profile.is_release() {

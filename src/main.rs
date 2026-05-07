@@ -1,3 +1,4 @@
+mod analyze;
 mod build;
 mod cache;
 mod cli;
@@ -8,6 +9,8 @@ mod input;
 mod log;
 mod pipeline;
 mod scaffold;
+mod signing;
+mod trace;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -18,6 +21,9 @@ fn main() -> Result<()> {
     let args = Cli::parse();
     match args.command {
         Some(Command::Cache { action }) => run_cache(&action),
+        Some(Command::Analyze { index, config, quiet, verbose }) => {
+            analyze::run(analyze::AnalyzeArgs { index, config, quiet, verbose })
+        }
         Some(Command::Dev {
             index,
             platform,

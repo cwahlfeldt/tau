@@ -24,6 +24,12 @@ pub struct Cli {
     #[arg(long)]
     pub release: bool,
 
+    /// Disable reachability-based tree-shaking — ship the whole source
+    /// tree (minus `exclude`). Useful when auto-discovery misses something
+    /// dynamic and you want a quick unblock without editing config.
+    #[arg(long)]
+    pub no_tree_shake: bool,
+
     /// Comma-separated list of target platforms: macos, windows, linux, android, ios
     #[arg(short, long, value_delimiter = ',')]
     pub platform: Vec<String>,
@@ -82,6 +88,24 @@ pub enum Command {
     Cache {
         #[command(subcommand)]
         action: CacheAction,
+    },
+    /// Trace which files are reachable from `index.html` and report what
+    /// would be embedded vs. excluded if you ran a build right now. Read-only.
+    Analyze {
+        /// Path to a local index.html (URLs are not analyzable).
+        index: PathBuf,
+
+        /// Path to a tau.conf.json (defaults to ./tau.conf.json).
+        #[arg(long)]
+        config: Option<PathBuf>,
+
+        /// Suppress all non-error output.
+        #[arg(short, long, conflicts_with = "verbose")]
+        quiet: bool,
+
+        /// Show extra output.
+        #[arg(short, long)]
+        verbose: bool,
     },
     /// Run `cargo tauri dev` against a freshly-scaffolded project for fast iteration.
     Dev {

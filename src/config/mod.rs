@@ -28,12 +28,20 @@ pub struct Config {
     pub platforms: Vec<Platform>,
     pub profile: BuildProfile,
     /// Glob patterns (relative to the source root) of files to exclude when
-    /// materializing the frontend tree the bundler embeds. Tauri's
-    /// `frontendDist` walks the whole directory, so without this `.git`,
-    /// `node_modules`, `build/` outputs, README files etc. all ship inside
-    /// the app. `default_excludes()` covers the most common footguns;
-    /// users add to it via `tau.conf.json`.
+    /// materializing the frontend tree the bundler embeds. Applied as a
+    /// post-trace overlay when `tree_shake` is on (drops files even if
+    /// reachable), and as the sole filter when `tree_shake` is off.
     pub exclude: Vec<String>,
+    /// Glob patterns (relative to the source root) of files that must
+    /// always be included regardless of reachability. The escape hatch
+    /// for dynamically-loaded assets the tracer can't see (computed
+    /// `fetch`/`new URL` paths, workers loaded by computed name, etc.).
+    /// Empty when `tree_shake` is off.
+    pub include: Vec<String>,
+    /// When true (default), only files reachable from `index.html` are
+    /// embedded in the bundle. When false, the whole source tree minus
+    /// `exclude` ships — the original "we don't rewrite, just point" mode.
+    pub tree_shake: bool,
 }
 
 /// Patterns always excluded from the materialized frontend tree, regardless
@@ -51,6 +59,10 @@ pub fn default_excludes() -> Vec<String> {
         ".claude".into(),
         ".claude/**".into(),
         "tau.conf.json".into(),
+        // Source maps sit next to source files but are never reachable at
+        // runtime in a packaged app — they only matter when devtools is
+        // pointed at a hosted source tree.
+        "**/*.map".into(),
     ]
 }
 
@@ -93,9 +105,20 @@ struct FileConfig {
     identifier: Option<String>,
     build: Option<BuildSection>,
     signing: Option<SigningConfig>,
-    /// User-supplied glob patterns (relative to source root) that are
-    /// appended to `default_excludes()`.
+    /// User-supplied glob patterns (relative to source root) appended to
+    /// `default_excludes()`. With `treeShake` on these act as a *post-trace*
+    /// overlay (drop a file even if reachable); with `treeShake` off
+    /// they're the sole filter against the full tree.
     exclude: Option<Vec<String>>,
+    /// Globs (relative to source root) that must always be embedded
+    /// regardless of reachability. Escape hatch for dynamic loads.
+    /// Ignored when `treeShake` is off.
+    include: Option<Vec<String>>,
+    /// Discover reachable files from `index.html` and only embed those.
+    /// Defaults to true. Set to false to ship the whole source tree minus
+    /// `exclude` (the original behavior).
+    #[serde(rename = "treeShake")]
+    tree_shake: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -157,6 +180,14 @@ pub fn resolve(cwd: &Path, index_dir: Option<&Path>, cli: &Cli) -> Result<Config
         exclude.extend(user);
     }
 
+    let include = file.include.unwrap_or_default();
+    // CLI `--no-tree-shake` wins over the config file. Default is on.
+    let tree_shake = if cli.no_tree_shake {
+        false
+    } else {
+        file.tree_shake.unwrap_or(true)
+    };
+
     Ok(Config {
         name,
         version,
@@ -165,6 +196,8 @@ pub fn resolve(cwd: &Path, index_dir: Option<&Path>, cli: &Cli) -> Result<Config
         platforms,
         profile,
         exclude,
+        include,
+        tree_shake,
     })
 }
 
@@ -241,6 +274,31 @@ mod tests {
     fn build_profile_dir_name() {
         assert_eq!(BuildProfile::Debug.dir_name(), "debug");
         assert_eq!(BuildProfile::Release.dir_name(), "release");
+    }
+
+    #[test]
+    fn file_config_tree_shake_defaults_on_when_omitted() {
+        let parsed: FileConfig = serde_json::from_str("{}").unwrap();
+        assert!(parsed.tree_shake.is_none());
+        // resolve() materializes the default to true.
+    }
+
+    #[test]
+    fn file_config_parses_include_and_tree_shake() {
+        let json = r#"{
+            "include": ["data/**/*.json", "models/*.glb"],
+            "treeShake": false
+        }"#;
+        let parsed: FileConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.include.unwrap().len(), 2);
+        assert_eq!(parsed.tree_shake, Some(false));
+    }
+
+    #[test]
+    fn default_excludes_includes_source_maps() {
+        // Source maps sit next to source files but are never reachable.
+        // If this changes, tree-shaking discovery may suddenly include them.
+        assert!(default_excludes().iter().any(|e| e == "**/*.map"));
     }
 
     #[test]

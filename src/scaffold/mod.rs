@@ -209,6 +209,8 @@ mod tests {
             platforms: vec![],
             profile: BuildProfile::Debug,
             exclude: vec![],
+            include: vec![],
+            tree_shake: true,
         }
     }
 

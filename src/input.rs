@@ -8,7 +8,10 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
 pub enum Input {
-    File { source_root: PathBuf },
+    /// Local file input. `index` is the absolute path to the HTML file
+    /// the user passed; `source_root` is its containing directory and
+    /// what `frontendDist` ultimately points at.
+    File { source_root: PathBuf, index: PathBuf },
     Url(String),
 }
 
@@ -29,13 +32,13 @@ impl Input {
             .parent()
             .ok_or_else(|| anyhow!("could not determine source root from {}", index_path.display()))?
             .to_path_buf();
-        Ok(Input::File { source_root })
+        Ok(Input::File { source_root, index: index_path })
     }
 
     /// Short, user-facing label for the header line.
     pub fn label(&self) -> String {
         match self {
-            Input::File { source_root } => source_root.display().to_string(),
+            Input::File { source_root, .. } => source_root.display().to_string(),
             Input::Url(u) => u.clone(),
         }
     }
@@ -54,6 +57,20 @@ mod tests {
     fn https_is_url() {
         assert!(matches!(Input::parse("https://example.com").unwrap(), Input::Url(_)));
         assert!(matches!(Input::parse("HTTPS://Example.com").unwrap(), Input::Url(_)));
+    }
+
+    #[test]
+    fn file_input_carries_index_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let idx = tmp.path().join("index.html");
+        std::fs::write(&idx, "").unwrap();
+        match Input::parse(idx.to_str().unwrap()).unwrap() {
+            Input::File { source_root, index } => {
+                assert_eq!(source_root, std::fs::canonicalize(tmp.path()).unwrap());
+                assert_eq!(index, std::fs::canonicalize(&idx).unwrap());
+            }
+            _ => panic!("expected File"),
+        }
     }
 
     #[test]

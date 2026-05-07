@@ -11,7 +11,8 @@
 
 use anyhow::{Context, Result};
 use globset::{Glob, GlobSet, GlobSetBuilder};
-use std::path::Path;
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 use walkdir::WalkDir;
 
@@ -91,6 +92,56 @@ fn build_matcher(patterns: &[String]) -> Result<GlobSet> {
         builder.add(glob);
     }
     builder.build().context("build exclude matcher")
+}
+
+/// Materialize the allow-list path of the build (used when `tree_shake`
+/// is on). Files are copied iff they appear in `allowed` AND are not
+/// matched by `exclude_patterns`. Returns the same `Materialized`
+/// struct as `materialize` so callers can be uniform.
+///
+/// `excluded` here counts files dropped by either being unreached or
+/// matching `exclude_patterns` — i.e. anything in the source tree that
+/// did not make it into the temp dir.
+pub fn materialize_allowlist(
+    source: &Path,
+    allowed: &BTreeSet<PathBuf>,
+    exclude_patterns: &[String],
+) -> Result<Materialized> {
+    let exclude = build_matcher(exclude_patterns)?;
+    let dest = tempfile::Builder::new()
+        .prefix("tau-frontend-")
+        .tempdir()
+        .context("failed to create temp frontend dir")?;
+
+    let mut copied = 0usize;
+    let mut excluded = 0usize;
+
+    for entry in WalkDir::new(source).into_iter().filter_map(|e| e.ok()) {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let path = entry.path();
+        let rel = match path.strip_prefix(source) {
+            Ok(r) if !r.as_os_str().is_empty() => r.to_path_buf(),
+            _ => continue,
+        };
+
+        if !allowed.contains(&rel) || exclude.is_match(&rel) {
+            excluded += 1;
+            continue;
+        }
+
+        let target = dest.path().join(&rel);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create dir {}", parent.display()))?;
+        }
+        std::fs::copy(path, &target)
+            .with_context(|| format!("copy {} -> {}", path.display(), target.display()))?;
+        copied += 1;
+    }
+
+    Ok(Materialized { dir: dest, copied, excluded })
 }
 
 #[cfg(test)]
@@ -181,5 +232,55 @@ mod tests {
         let err = build_matcher(&["[unclosed".into()]).unwrap_err();
         let msg = format!("{:#}", err);
         assert!(msg.contains("[unclosed"), "error should reference the bad pattern: {msg}");
+    }
+
+    #[test]
+    fn allowlist_copies_only_allowed_files() {
+        let src = tempfile::tempdir().unwrap();
+        touch(&src.path().join("index.html"));
+        touch(&src.path().join("app.js"));
+        touch(&src.path().join("orphan.js"));
+        touch(&src.path().join("lib/keep.js"));
+        touch(&src.path().join("lib/drop.js"));
+
+        let allowed: BTreeSet<PathBuf> = [
+            PathBuf::from("index.html"),
+            PathBuf::from("app.js"),
+            PathBuf::from("lib/keep.js"),
+        ]
+        .into_iter()
+        .collect();
+
+        let m = materialize_allowlist(src.path(), &allowed, &[]).unwrap();
+        let kept = collect_relpaths(m.path());
+        assert!(kept.contains(&PathBuf::from("index.html")));
+        assert!(kept.contains(&PathBuf::from("app.js")));
+        assert!(kept.contains(&PathBuf::from("lib/keep.js")));
+        assert!(!kept.contains(&PathBuf::from("orphan.js")));
+        assert!(!kept.contains(&PathBuf::from("lib/drop.js")));
+    }
+
+    #[test]
+    fn allowlist_exclude_overlay_drops_reached_files() {
+        // A file that's reachable AND excluded should still be dropped —
+        // this is the "post-trace overlay" semantic.
+        let src = tempfile::tempdir().unwrap();
+        touch(&src.path().join("index.html"));
+        touch(&src.path().join("lib/keep.js"));
+        touch(&src.path().join("lib/License.txt"));
+
+        let allowed: BTreeSet<PathBuf> = [
+            PathBuf::from("index.html"),
+            PathBuf::from("lib/keep.js"),
+            PathBuf::from("lib/License.txt"),
+        ]
+        .into_iter()
+        .collect();
+
+        let m =
+            materialize_allowlist(src.path(), &allowed, &["**/License.txt".into()]).unwrap();
+        let kept = collect_relpaths(m.path());
+        assert!(kept.contains(&PathBuf::from("lib/keep.js")));
+        assert!(!kept.contains(&PathBuf::from("lib/License.txt")));
     }
 }
