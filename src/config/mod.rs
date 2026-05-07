@@ -4,7 +4,7 @@
 //! `Config` is the immutable, validated handle that every downstream stage
 //! (`scaffold`, `build`) consumes by reference.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
@@ -29,20 +29,18 @@ pub struct Config {
     pub profile: BuildProfile,
 }
 
-/// "What kind of build" with signing baked in. Release without signing is
-/// unrepresentable so we fail at config time, not deep inside the build.
-/// The `SigningConfig` payload is currently a seam — release signing is
-/// validated but not yet wired into the build commands.
-#[derive(Debug, Clone)]
+/// Rust compile profile. Independent of bundle signing — an unsigned
+/// release build is valid (it's what you sideload locally), and signing
+/// is a separate distribution concern that may also apply to debug builds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuildProfile {
     Debug,
-    #[allow(dead_code)]
-    Release(SigningConfig),
+    Release,
 }
 
 impl BuildProfile {
     pub fn is_release(&self) -> bool {
-        matches!(self, BuildProfile::Release(_))
+        matches!(self, BuildProfile::Release)
     }
 
     pub fn dir_name(&self) -> &'static str {
@@ -113,7 +111,8 @@ pub fn resolve(cwd: &Path, index_dir: Option<&Path>, cli: &Cli) -> Result<Config
         .unwrap_or_else(|| DEFAULT_OUTPUT.to_string());
 
     let platforms = resolve_platforms(&cli.platform, build.platforms.as_deref())?;
-    let profile = resolve_profile(cli.release, file.signing)?;
+    let profile = if cli.release { BuildProfile::Release } else { BuildProfile::Debug };
+    let _ = file.signing; // parsed for forward-compat; not yet wired into builds
 
     Ok(Config {
         name,
@@ -135,15 +134,6 @@ fn resolve_platforms(cli_platforms: &[String], file_platforms: Option<&[String]>
         Some(list) => list.iter().map(|s| s.parse::<Platform>()).collect(),
         None => Ok(vec![Platform::host()]),
     }
-}
-
-fn resolve_profile(release: bool, signing: Option<SigningConfig>) -> Result<BuildProfile> {
-    if !release {
-        return Ok(BuildProfile::Debug);
-    }
-    let signing = signing
-        .ok_or_else(|| anyhow!("--release requires a 'signing' block in tau.conf.json"))?;
-    Ok(BuildProfile::Release(signing))
 }
 
 fn load_file_config(
@@ -206,7 +196,7 @@ mod tests {
     #[test]
     fn build_profile_dir_name() {
         assert_eq!(BuildProfile::Debug.dir_name(), "debug");
-        assert_eq!(BuildProfile::Release(SigningConfig::default()).dir_name(), "release");
+        assert_eq!(BuildProfile::Release.dir_name(), "release");
     }
 
     #[test]

@@ -265,4 +265,16 @@ mod tests {
         assert!(CARGO_TMPL.contains("[profile.dev]"));
         assert!(CARGO_TMPL.contains("incremental = false"));
     }
+
+    #[test]
+    fn cargo_template_release_profile_is_size_tuned() {
+        // Without these, a release Android APK ships ~80-100 MB of unstripped
+        // Rust cdylib per ABI. Removing any of them silently re-bloats output.
+        assert!(CARGO_TMPL.contains("[profile.release]"));
+        assert!(CARGO_TMPL.contains("strip = true"));
+        assert!(CARGO_TMPL.contains("lto = true"));
+        assert!(CARGO_TMPL.contains("opt-level = \"s\""));
+        assert!(CARGO_TMPL.contains("panic = \"abort\""));
+        assert!(CARGO_TMPL.contains("codegen-units = 1"));
+    }
 }

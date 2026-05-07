@@ -20,7 +20,7 @@ pub struct Cli {
     /// (required when not using a subcommand)
     pub index: Option<PathBuf>,
 
-    /// Build a signed release (requires tau.conf.json with signing keys)
+    /// Build with the release profile (optimized + stripped). Unsigned.
     #[arg(long)]
     pub release: bool,
 

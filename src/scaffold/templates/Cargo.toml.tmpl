@@ -24,3 +24,14 @@ custom-protocol = ["tauri/custom-protocol"]
 # avoids ~100+ MB per build of dead state in the shared CARGO_TARGET_DIR.
 [profile.dev]
 incremental = false
+
+# Release tuned for shipped binary size. Without these, an unstripped Tauri
+# cdylib lands at ~80-100 MB per Android ABI (×4 ABIs in a universal APK);
+# stripping + LTO + size-opt cuts that to ~5-15 MB per ABI. Release builds
+# are slower as a result, but that cost is only paid on `--release`.
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
