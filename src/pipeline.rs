@@ -1,10 +1,9 @@
 //! End-to-end orchestration of a single wrap.
 //!
-//! The pipeline is intentionally linear: resolve config, discover assets
-//! (or skip for URL inputs), scaffold a Tauri project in a tempdir, then
-//! build & extract artifacts for each requested platform. Each stage is
-//! implemented in its own module — `pipeline::run` is the only place
-//! that knows the order they fire in.
+//! The pipeline is intentionally linear: resolve config, scaffold a Tauri
+//! project in a tempdir whose `frontendDist` points at the user's source
+//! directory (no asset copying or HTML rewriting), then build & extract
+//! artifacts for each requested platform.
 
 use anyhow::{anyhow, Context, Result};
 use std::path::PathBuf;
@@ -12,7 +11,7 @@ use std::path::PathBuf;
 use crate::cli::Cli;
 use crate::input::Input;
 use crate::log::Logger;
-use crate::{build, config, discover, scaffold};
+use crate::{build, config, scaffold};
 
 pub fn run(args: Cli) -> Result<()> {
     let log = Logger::new(args.log_level());
@@ -27,10 +26,8 @@ pub fn run(args: Cli) -> Result<()> {
     let project_dir = workdir.path().to_path_buf();
 
     match &inputs.input {
-        Input::File { index_path, source_root } => {
-            let discovered = discover::discover(index_path, source_root, &inputs.cfg)?;
-            log.detail("assets", &format!("{} files", discovered.assets.len()));
-            scaffold::create(&project_dir, &inputs.cfg, &discovered)?;
+        Input::File { source_root, .. } => {
+            scaffold::create_for_source(&project_dir, &inputs.cfg, source_root)?;
         }
         Input::Url(url) => {
             scaffold::create_for_url(&project_dir, &inputs.cfg, url)?;

@@ -2,7 +2,7 @@
 //!
 //! Three-tier resolution: CLI flags > `tau.conf.json` > defaults.
 //! `Config` is the immutable, validated handle that every downstream stage
-//! (`discover`, `scaffold`, `build`) consumes by reference.
+//! (`scaffold`, `build`) consumes by reference.
 
 use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
@@ -24,7 +24,6 @@ pub struct Config {
     pub name: String,
     pub version: String,
     pub identifier: String,
-    pub include: Vec<String>,
     pub output: String,
     pub platforms: Vec<Platform>,
     pub profile: BuildProfile,
@@ -69,7 +68,6 @@ struct FileConfig {
     name: Option<String>,
     version: Option<String>,
     identifier: Option<String>,
-    include: Option<Vec<String>>,
     build: Option<BuildSection>,
     signing: Option<SigningConfig>,
 }
@@ -121,7 +119,6 @@ pub fn resolve(cwd: &Path, index_dir: Option<&Path>, cli: &Cli) -> Result<Config
         name,
         version,
         identifier,
-        include: file.include.unwrap_or_default(),
         output,
         platforms,
         profile,

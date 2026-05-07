@@ -1,18 +1,20 @@
 //! Generate a minimal Tauri v2 project on disk.
 //!
+//! We don't bundle the user's frontend into a `dist/` of our own — we just
+//! point Tauri's `frontendDist` at the source directory the user gave us.
+//! Tauri serves the files (with correct MIME types) and bundles the whole
+//! tree into the platform package. No HTML rewriting, no asset discovery,
+//! no plugin shims.
+//!
 //! Layout written into the temp project dir:
 //! ```text
 //! <tmp>/
-//!   dist/                     # bundled web app (Tauri frontendDist)
-//!     index.html              # rewritten by `discover`
-//!     __tauri/                # injected plugin IIFE bundles
-//!     <user assets>
 //!   src-tauri/
 //!     Cargo.toml
-//!     tauri.conf.json
+//!     tauri.conf.json   # frontendDist points at user's source dir
 //!     build.rs
 //!     src/{main,lib}.rs
-//!     capabilities/{default,mobile}.json
+//!     capabilities/default.json
 //!     icons/icon.png
 //! ```
 
@@ -21,7 +23,6 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
 use crate::config::Config;
-use crate::discover::Discovered;
 
 const CARGO_TMPL: &str = include_str!("templates/Cargo.toml.tmpl");
 const MAIN_TMPL: &str = include_str!("templates/main.rs.tmpl");
@@ -29,42 +30,8 @@ const LIB_TMPL: &str = include_str!("templates/lib.rs.tmpl");
 const BUILD_TMPL: &str = include_str!("templates/build.rs.tmpl");
 const ICON_PNG: &[u8] = include_bytes!("templates/icon.png");
 
-const PLUGIN_FS_JS: &[u8] = include_bytes!("templates/plugins/fs.iife.js");
-const PLUGIN_DIALOG_JS: &[u8] = include_bytes!("templates/plugins/dialog.iife.js");
-const PLUGIN_HAPTICS_JS: &[u8] = include_bytes!("templates/plugins/haptics.iife.js");
-
-const LIVERELOAD_JS: &[u8] = include_bytes!("templates/livereload.js");
-
-/// File polled by the dev-only livereload IIFE. The `tau dev` watcher
-/// rewrites this with a fresh integer after each scaffold refresh; the
-/// JS sees the change and reloads the webview.
-pub const RELOAD_TOKEN_FILE: &str = "reload-token";
-
-/// Plugin IIFE bundles emitted into `dist/__tauri/` and loaded by injected
-/// `<script>` tags in the wrapped app's `<head>`. Filenames here MUST match
-/// the script tags injected by `discover::PLUGIN_HEAD_INJECTION`.
-const PLUGIN_BUNDLES: &[(&str, &[u8])] = &[
-    ("fs.js", PLUGIN_FS_JS),
-    ("dialog.js", PLUGIN_DIALOG_JS),
-    ("haptics.js", PLUGIN_HAPTICS_JS),
-];
-
-const PLUGIN_DIR_NAME: &str = "__tauri";
-
-/// Path to the dev-only reload token file inside a generated scaffold.
-/// `tau dev` rewrites this to bump the watcher; the injected livereload
-/// IIFE polls it.
-pub fn reload_token_path(project_dir: &Path) -> PathBuf {
-    project_dir
-        .join("dist")
-        .join(PLUGIN_DIR_NAME)
-        .join(RELOAD_TOKEN_FILE)
-}
-
 /// All paths inside the generated scaffold, derived once from the project root.
 struct Layout {
-    dist: PathBuf,
-    plugins: PathBuf,
     src_tauri: PathBuf,
     src_tauri_src: PathBuf,
     capabilities: PathBuf,
@@ -73,11 +40,8 @@ struct Layout {
 
 impl Layout {
     fn new(project_dir: &Path) -> Self {
-        let dist = project_dir.join("dist");
         let src_tauri = project_dir.join("src-tauri");
         Self {
-            plugins: dist.join(PLUGIN_DIR_NAME),
-            dist,
             src_tauri_src: src_tauri.join("src"),
             capabilities: src_tauri.join("capabilities"),
             icons: src_tauri.join("icons"),
@@ -87,8 +51,6 @@ impl Layout {
 
     fn ensure_dirs(&self) -> Result<()> {
         for dir in [
-            &self.dist,
-            &self.plugins,
             &self.src_tauri,
             &self.src_tauri_src,
             &self.capabilities,
@@ -101,67 +63,40 @@ impl Layout {
     }
 }
 
-pub fn create(project_dir: &Path, cfg: &Config, discovered: &Discovered) -> Result<()> {
-    create_with_mode(project_dir, cfg, discovered, false)
-}
-
-pub fn create_with_mode(
-    project_dir: &Path,
-    cfg: &Config,
-    discovered: &Discovered,
-    dev_mode: bool,
-) -> Result<()> {
+/// Create a Tauri scaffold whose `frontendDist` points at `source_root`.
+/// Tauri reads files directly from there at build time and at dev time.
+pub fn create_for_source(project_dir: &Path, cfg: &Config, source_root: &Path) -> Result<()> {
     let layout = Layout::new(project_dir);
     layout.ensure_dirs()?;
-
-    write_frontend(&layout, discovered, dev_mode)?;
-    write_src_tauri(&layout, cfg, None)?;
+    write_src_tauri(&layout, cfg, FrontendSource::Local(source_root))?;
     Ok(())
 }
 
-/// Scaffold a Tauri project whose webview points at a remote URL instead
-/// of a local `index.html`. No asset discovery, no plugin injection —
-/// the page is loaded over the network.
-///
-/// We still write a placeholder `dist/index.html` because Tauri's bundler
-/// requires `frontendDist` to exist at build time. It's never actually
-/// shown: `app.windows[0].url` overrides it.
+/// Scaffold a Tauri project whose webview points at a remote URL. We still
+/// need a `frontendDist` that exists at build time (the bundler insists);
+/// we use a one-file stub directory inside the scaffold itself.
 pub fn create_for_url(project_dir: &Path, cfg: &Config, url: &str) -> Result<()> {
     let layout = Layout::new(project_dir);
     layout.ensure_dirs()?;
 
-    write_bytes(&layout.dist.join("index.html"), URL_STUB_HTML.as_bytes())?;
-    write_src_tauri(&layout, cfg, Some(url))?;
+    let stub_dir = project_dir.join("dist");
+    std::fs::create_dir_all(&stub_dir).with_context(|| format!("create dir {}", stub_dir.display()))?;
+    write_bytes(&stub_dir.join("index.html"), URL_STUB_HTML.as_bytes())?;
+
+    write_src_tauri(&layout, cfg, FrontendSource::Url { url, stub_dir: &stub_dir })?;
     Ok(())
 }
 
 const URL_STUB_HTML: &str = "<!doctype html><meta charset=\"utf-8\"><title>tau</title>";
 
-/// Rewrite `dist/` (index.html, user assets, plugin bundles, and the
-/// dev-only livereload bits) for an existing scaffold. Used by `tau dev`
-/// to refresh the webview's source on filesystem changes without
-/// regenerating the Rust crate.
-pub fn refresh_frontend(
-    project_dir: &Path,
-    discovered: &Discovered,
-    dev_mode: bool,
-) -> Result<()> {
-    let layout = Layout::new(project_dir);
-    write_frontend(&layout, discovered, dev_mode)
+enum FrontendSource<'a> {
+    Local(&'a Path),
+    Url { url: &'a str, stub_dir: &'a Path },
 }
 
-fn write_frontend(layout: &Layout, discovered: &Discovered, dev_mode: bool) -> Result<()> {
-    write_bytes(&layout.dist.join("index.html"), &discovered.index_html)?;
-    copy_assets(&layout.dist, discovered)?;
-    write_plugin_bundles(&layout.plugins, dev_mode)?;
-    Ok(())
-}
-
-fn write_src_tauri(layout: &Layout, cfg: &Config, window_url: Option<&str>) -> Result<()> {
-    // The wrapped crate uses a fixed name (`tau_app`) so artifacts in
-    // the shared CARGO_TARGET_DIR can be reused across different wrapped apps.
-    // Per-app branding lives in `tauri.conf.json` (`productName`/`identifier`),
-    // not in the Rust crate identity.
+fn write_src_tauri(layout: &Layout, cfg: &Config, frontend: FrontendSource<'_>) -> Result<()> {
+    // Fixed crate name lets the shared CARGO_TARGET_DIR be reused across
+    // wraps. Per-app branding lives in tauri.conf.json (productName/identifier).
     write_text(
         &layout.src_tauri.join("Cargo.toml"),
         &render(CARGO_TMPL, &[("version", &cfg.version)]),
@@ -169,45 +104,10 @@ fn write_src_tauri(layout: &Layout, cfg: &Config, window_url: Option<&str>) -> R
     write_text(&layout.src_tauri.join("build.rs"), BUILD_TMPL)?;
     write_text(&layout.src_tauri_src.join("main.rs"), MAIN_TMPL)?;
     write_text(&layout.src_tauri_src.join("lib.rs"), LIB_TMPL)?;
-    write_json(&layout.src_tauri.join("tauri.conf.json"), &tauri_conf(cfg, window_url))?;
+    write_json(&layout.src_tauri.join("tauri.conf.json"), &tauri_conf(cfg, &frontend))?;
     write_json(&layout.capabilities.join("default.json"), &default_capability())?;
-    write_json(&layout.capabilities.join("mobile.json"), &mobile_capability())?;
     write_bytes(&layout.icons.join("icon.png"), ICON_PNG)?;
     Ok(())
-}
-
-fn write_plugin_bundles(plugin_dir: &Path, dev_mode: bool) -> Result<()> {
-    for (filename, bytes) in PLUGIN_BUNDLES {
-        write_bytes(&plugin_dir.join(filename), bytes)?;
-    }
-    if dev_mode {
-        write_bytes(&plugin_dir.join("livereload.js"), LIVERELOAD_JS)?;
-    }
-    Ok(())
-}
-
-fn copy_assets(dist_dir: &Path, discovered: &Discovered) -> Result<()> {
-    for rel in &discovered.assets {
-        if is_root_index(rel) {
-            continue;
-        }
-        let from = discovered.source_root.join(rel);
-        let to = dist_dir.join(rel);
-        if let Some(parent) = to.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        if from.is_file() {
-            std::fs::copy(&from, &to)
-                .with_context(|| format!("copy {} -> {}", from.display(), to.display()))?;
-        }
-    }
-    Ok(())
-}
-
-/// `index.html` was already written from rewritten bytes in `write_frontend`.
-fn is_root_index(rel: &Path) -> bool {
-    let at_root = rel.parent().is_none_or(|p| p.as_os_str().is_empty());
-    at_root && rel.file_name().and_then(|s| s.to_str()) == Some("index.html")
 }
 
 fn write_text(path: &Path, contents: &str) -> Result<()> {
@@ -234,27 +134,32 @@ fn render(template: &str, vars: &[(&str, &str)]) -> String {
     out
 }
 
-fn tauri_conf(cfg: &Config, window_url: Option<&str>) -> Value {
-    // Skip installer formats (dmg/msi/etc.) — we only want the runnable app.
-    // The dmg bundler in particular spawns bundle_dmg.sh which mounts and
-    // opens a disk image, which is intrusive.
+fn tauri_conf(cfg: &Config, frontend: &FrontendSource<'_>) -> Value {
+    // `withGlobalTauri` exposes core APIs at `window.__TAURI__.*` for plain
+    // <script>-loaded code (no bundler required). Plugins are not registered
+    // by default — users who want them can scaffold their own Tauri project.
     let mut window = json!({
         "label": "main",
         "title": cfg.name,
         "width": 1024,
         "height": 768,
         "resizable": true,
-        "fullscreen": false
+        "fullscreen": false,
+        "titleBarStyle": "Transparent",
+        "hiddenTitle": true
     });
-    if let Some(url) = window_url {
-        window["url"] = Value::String(url.to_string());
+    if let FrontendSource::Url { url, .. } = frontend {
+        window["url"] = Value::String((*url).to_string());
     }
+
+    let frontend_dist = frontend_dist_value(frontend);
+
     json!({
         "$schema": "https://schema.tauri.app/config/2",
         "productName": cfg.name,
         "version": cfg.version,
         "identifier": cfg.identifier,
-        "build": { "frontendDist": "../dist" },
+        "build": { "frontendDist": frontend_dist },
         "app": {
             "windows": [window],
             "security": { "csp": null },
@@ -262,10 +167,22 @@ fn tauri_conf(cfg: &Config, window_url: Option<&str>) -> Value {
         },
         "bundle": {
             "active": true,
+            // Skip installer formats (dmg/msi/etc.) — the dmg bundler in
+            // particular mounts and opens a disk image during the build.
             "targets": ["app", "appimage", "nsis"],
             "icon": ["icons/icon.png"]
         }
     })
+}
+
+/// `frontendDist` is interpreted relative to `src-tauri/`. Absolute paths
+/// work too, which is what we want for both the user's source dir (anywhere
+/// on disk) and the URL-mode stub (sibling of `src-tauri/`).
+fn frontend_dist_value(frontend: &FrontendSource<'_>) -> String {
+    match frontend {
+        FrontendSource::Local(p) => p.display().to_string(),
+        FrontendSource::Url { stub_dir, .. } => stub_dir.display().to_string(),
+    }
 }
 
 fn default_capability() -> Value {
@@ -274,36 +191,25 @@ fn default_capability() -> Value {
         "identifier": "default",
         "description": "Default capability for the wrapped app",
         "windows": ["main"],
-        "permissions": ["core:default", "fs:default", "dialog:default"]
-    })
-}
-
-/// Mobile-only permissions live in a platform-scoped capability. Putting
-/// haptics permissions in the desktop capability would fail `tauri-build` —
-/// the haptics crate isn't compiled in for desktop targets, so the
-/// permission IDs aren't registered.
-///
-/// Note: `tauri-plugin-haptics` does not ship a `default.toml` permission
-/// set (unlike fs/dialog), so we list each command-level allow explicitly.
-fn mobile_capability() -> Value {
-    json!({
-        "$schema": "../gen/schemas/mobile-schema.json",
-        "identifier": "mobile",
-        "description": "Mobile-only capabilities for the wrapped app",
-        "windows": ["main"],
-        "platforms": ["iOS", "android"],
-        "permissions": [
-            "haptics:allow-vibrate",
-            "haptics:allow-impact-feedback",
-            "haptics:allow-notification-feedback",
-            "haptics:allow-selection-feedback"
-        ]
+        "permissions": ["core:default"]
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{BuildProfile, Config};
+
+    fn sample_cfg() -> Config {
+        Config {
+            name: "X".into(),
+            version: "0.1.0".into(),
+            identifier: "com.x".into(),
+            output: ".".into(),
+            platforms: vec![],
+            profile: BuildProfile::Debug,
+        }
+    }
 
     #[test]
     fn render_substitutes_vars() {
@@ -312,7 +218,7 @@ mod tests {
     }
 
     #[test]
-    fn default_capability_includes_fs_and_dialog_not_haptics() {
+    fn default_capability_only_grants_core() {
         let v = default_capability();
         let perms: Vec<&str> = v["permissions"]
             .as_array()
@@ -320,62 +226,30 @@ mod tests {
             .iter()
             .map(|x| x.as_str().unwrap())
             .collect();
-        assert!(perms.contains(&"core:default"));
-        assert!(perms.contains(&"fs:default"));
-        assert!(perms.contains(&"dialog:default"));
-        assert!(!perms.contains(&"haptics:default"));
-    }
-
-    #[test]
-    fn mobile_capability_is_platform_scoped() {
-        let v = mobile_capability();
-        assert_eq!(v["platforms"], serde_json::json!(["iOS", "android"]));
-        let perms: Vec<&str> = v["permissions"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|x| x.as_str().unwrap())
-            .collect();
-        // tauri-plugin-haptics has no `default` permission set, so we list
-        // each command-level allow explicitly.
-        assert!(perms.contains(&"haptics:allow-vibrate"));
-        assert!(perms.contains(&"haptics:allow-impact-feedback"));
-        assert!(perms.contains(&"haptics:allow-notification-feedback"));
-        assert!(perms.contains(&"haptics:allow-selection-feedback"));
-        assert!(!perms.contains(&"haptics:default"));
+        assert_eq!(perms, vec!["core:default"]);
     }
 
     #[test]
     fn tauri_conf_enables_global_tauri() {
-        use crate::config::{BuildProfile, Config};
-        let cfg = Config {
-            name: "X".into(),
-            version: "0.1.0".into(),
-            identifier: "com.x".into(),
-            include: vec![],
-            output: ".".into(),
-            platforms: vec![],
-            profile: BuildProfile::Debug,
-        };
-        let v = tauri_conf(&cfg, None);
+        let v = tauri_conf(&sample_cfg(), &FrontendSource::Local(Path::new("/tmp/src")));
         assert_eq!(v["app"]["withGlobalTauri"], serde_json::json!(true));
         assert!(v["app"]["windows"][0].get("url").is_none());
     }
 
     #[test]
+    fn tauri_conf_points_frontend_dist_at_source_root() {
+        let v = tauri_conf(&sample_cfg(), &FrontendSource::Local(Path::new("/abs/src")));
+        assert_eq!(v["build"]["frontendDist"], serde_json::json!("/abs/src"));
+    }
+
+    #[test]
     fn tauri_conf_sets_window_url_for_remote_wrap() {
-        use crate::config::{BuildProfile, Config};
-        let cfg = Config {
-            name: "X".into(),
-            version: "0.1.0".into(),
-            identifier: "com.x".into(),
-            include: vec![],
-            output: ".".into(),
-            platforms: vec![],
-            profile: BuildProfile::Debug,
-        };
-        let v = tauri_conf(&cfg, Some("https://example.com"));
+        let v = tauri_conf(
+            &sample_cfg(),
+            &FrontendSource::Url { url: "https://example.com", stub_dir: Path::new("/tmp/stub") },
+        );
         assert_eq!(v["app"]["windows"][0]["url"], serde_json::json!("https://example.com"));
+        assert_eq!(v["build"]["frontendDist"], serde_json::json!("/tmp/stub"));
     }
 
     #[test]
@@ -390,25 +264,5 @@ mod tests {
     fn cargo_template_disables_incremental() {
         assert!(CARGO_TMPL.contains("[profile.dev]"));
         assert!(CARGO_TMPL.contains("incremental = false"));
-    }
-
-    #[test]
-    fn plugin_bundles_are_nonempty_and_self_contained() {
-        for (name, bytes) in PLUGIN_BUNDLES {
-            assert!(bytes.len() > 100, "{} bundle is suspiciously small", name);
-            let s = std::str::from_utf8(bytes).expect("plugin bundle is utf-8");
-            assert!(
-                !s.contains("require("),
-                "{} bundle contains unresolved require()",
-                name
-            );
-        }
-    }
-
-    #[test]
-    fn is_root_index_only_for_top_level() {
-        assert!(is_root_index(Path::new("index.html")));
-        assert!(!is_root_index(Path::new("sub/index.html")));
-        assert!(!is_root_index(Path::new("other.html")));
     }
 }

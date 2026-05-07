@@ -1,14 +1,14 @@
 //! Classify the positional `index` argument as either a local HTML file
-//! or a remote URL. URLs use a different scaffold path (no asset
-//! discovery, no plugin injection) — the wrapped app just points its
-//! window at the remote.
+//! or a remote URL. URLs cause the wrapped app's window to point at the
+//! remote; local files cause Tauri's `frontendDist` to point at their
+//! parent directory.
 
 use anyhow::{anyhow, Context, Result};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
 pub enum Input {
-    File { index_path: PathBuf, source_root: PathBuf },
+    File { source_root: PathBuf },
     Url(String),
 }
 
@@ -29,13 +29,13 @@ impl Input {
             .parent()
             .ok_or_else(|| anyhow!("could not determine source root from {}", index_path.display()))?
             .to_path_buf();
-        Ok(Input::File { index_path, source_root })
+        Ok(Input::File { source_root })
     }
 
     /// Short, user-facing label for the header line.
     pub fn label(&self) -> String {
         match self {
-            Input::File { source_root, .. } => source_root.display().to_string(),
+            Input::File { source_root } => source_root.display().to_string(),
             Input::Url(u) => u.clone(),
         }
     }
