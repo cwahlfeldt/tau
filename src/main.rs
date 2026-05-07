@@ -3,6 +3,7 @@ mod cache;
 mod cli;
 mod config;
 mod dev;
+mod filter;
 mod input;
 mod log;
 mod pipeline;

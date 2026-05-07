@@ -208,6 +208,7 @@ mod tests {
             output: ".".into(),
             platforms: vec![],
             profile: BuildProfile::Debug,
+            exclude: vec![],
         }
     }
 

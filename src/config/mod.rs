@@ -27,6 +27,31 @@ pub struct Config {
     pub output: String,
     pub platforms: Vec<Platform>,
     pub profile: BuildProfile,
+    /// Glob patterns (relative to the source root) of files to exclude when
+    /// materializing the frontend tree the bundler embeds. Tauri's
+    /// `frontendDist` walks the whole directory, so without this `.git`,
+    /// `node_modules`, `build/` outputs, README files etc. all ship inside
+    /// the app. `default_excludes()` covers the most common footguns;
+    /// users add to it via `tau.conf.json`.
+    pub exclude: Vec<String>,
+}
+
+/// Patterns always excluded from the materialized frontend tree, regardless
+/// of user config. The user's `output` dir is added on top of these by
+/// `resolve()` (it's only known after config layering).
+pub fn default_excludes() -> Vec<String> {
+    vec![
+        ".git".into(),
+        ".git/**".into(),
+        ".gitignore".into(),
+        ".DS_Store".into(),
+        "**/.DS_Store".into(),
+        "node_modules".into(),
+        "node_modules/**".into(),
+        ".claude".into(),
+        ".claude/**".into(),
+        "tau.conf.json".into(),
+    ]
 }
 
 /// Rust compile profile. Independent of bundle signing — an unsigned
@@ -68,6 +93,9 @@ struct FileConfig {
     identifier: Option<String>,
     build: Option<BuildSection>,
     signing: Option<SigningConfig>,
+    /// User-supplied glob patterns (relative to source root) that are
+    /// appended to `default_excludes()`.
+    exclude: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -114,6 +142,21 @@ pub fn resolve(cwd: &Path, index_dir: Option<&Path>, cli: &Cli) -> Result<Config
     let profile = if cli.release { BuildProfile::Release } else { BuildProfile::Debug };
     let _ = file.signing; // parsed for forward-compat; not yet wired into builds
 
+    let mut exclude = default_excludes();
+    // The user's output dir is one of the most common things to accidentally
+    // re-embed (a previous build sitting next to index.html). Auto-exclude
+    // it as a relative path; if `output` is absolute or escapes the source
+    // tree the matcher just won't match anything, which is the right
+    // outcome — no false positives.
+    let trimmed = output.trim_start_matches("./");
+    if !trimmed.is_empty() && !trimmed.starts_with('/') {
+        exclude.push(trimmed.to_string());
+        exclude.push(format!("{}/**", trimmed.trim_end_matches('/')));
+    }
+    if let Some(user) = file.exclude {
+        exclude.extend(user);
+    }
+
     Ok(Config {
         name,
         version,
@@ -121,6 +164,7 @@ pub fn resolve(cwd: &Path, index_dir: Option<&Path>, cli: &Cli) -> Result<Config
         output,
         platforms,
         profile,
+        exclude,
     })
 }
 

@@ -9,6 +9,7 @@ use anyhow::{anyhow, Context, Result};
 use std::path::PathBuf;
 
 use crate::cli::Cli;
+use crate::filter;
 use crate::input::Input;
 use crate::log::Logger;
 use crate::{build, config, scaffold};
@@ -25,14 +26,33 @@ pub fn run(args: Cli) -> Result<()> {
         .context("failed to create temp working directory")?;
     let project_dir = workdir.path().to_path_buf();
 
-    match &inputs.input {
+    // For local-file inputs we materialize a filtered copy of the source
+    // tree and point `frontendDist` at *that*, instead of the source dir
+    // itself. Without this, anything sitting next to `index.html` (`.git`,
+    // `node_modules`, prior build output, etc.) ends up embedded in the
+    // bundle, since Tauri's bundler walks the whole frontendDist directory.
+    // The handle is held until after the build so the tempdir survives.
+    let _frontend = match &inputs.input {
         Input::File { source_root, .. } => {
-            scaffold::create_for_source(&project_dir, &inputs.cfg, source_root)?;
+            let materialized = filter::materialize(source_root, &inputs.cfg.exclude)
+                .context("filter source tree")?;
+            log.detail(
+                "frontend",
+                &format!(
+                    "{} ({} files, {} excluded)",
+                    materialized.path().display(),
+                    materialized.copied,
+                    materialized.excluded
+                ),
+            );
+            scaffold::create_for_source(&project_dir, &inputs.cfg, materialized.path())?;
+            Some(materialized)
         }
         Input::Url(url) => {
             scaffold::create_for_url(&project_dir, &inputs.cfg, url)?;
+            None
         }
-    }
+    };
     log.detail("scaffold", &project_dir.display().to_string());
 
     if args.dry_run {
