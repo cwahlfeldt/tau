@@ -1,6 +1,6 @@
 [package]
 name = "tau"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Wrap a web app into a mobile or desktop app by pointing at index.html"
 license = "MIT"
