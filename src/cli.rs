@@ -83,10 +83,25 @@ pub enum Command {
         #[command(subcommand)]
         action: CacheAction,
     },
-    /// Run `cargo tauri dev` against a freshly-scaffolded project for fast iteration.
+    /// Scaffold a new tau game project (three.js + Vite, ready to dev).
+    Create {
+        /// Project name. Becomes the directory name and the default app name.
+        name: String,
+
+        /// Suppress all non-error output.
+        #[arg(short, long, conflicts_with = "verbose")]
+        quiet: bool,
+
+        /// Show extra output.
+        #[arg(short, long)]
+        verbose: bool,
+    },
+    /// Run a tau project in dev mode (Vite + Tauri webview), or wrap a
+    /// specific index.html / URL the legacy way if one is provided.
     Dev {
-        /// Path to a local index.html, or an http(s) URL to wrap directly
-        index: PathBuf,
+        /// Optional path to a local index.html, or an http(s) URL. Omit to
+        /// auto-detect a tau project from the current directory.
+        index: Option<PathBuf>,
 
         /// Single target platform: macos, windows, linux, android, ios. Defaults to host.
         #[arg(short, long)]
@@ -113,6 +128,53 @@ pub enum Command {
         quiet: bool,
 
         /// Show extra output.
+        #[arg(short, long)]
+        verbose: bool,
+    },
+    /// Build a tau project for distribution (Vite production build + Tauri bundle).
+    Build {
+        /// Build with the release profile (optimized + stripped). Unsigned.
+        #[arg(long)]
+        release: bool,
+
+        /// Comma-separated list of target platforms: macos, windows, linux, android, ios
+        #[arg(short, long, value_delimiter = ',')]
+        platform: Vec<String>,
+
+        /// Override the app name
+        #[arg(long)]
+        name: Option<String>,
+
+        /// Override the bundle identifier (e.g. com.example.app)
+        #[arg(long)]
+        identifier: Option<String>,
+
+        /// Override the output directory for built artifacts
+        #[arg(long)]
+        output: Option<PathBuf>,
+
+        /// Path to a tau.conf.json (defaults to <project>/tau.conf.json)
+        #[arg(long)]
+        config: Option<PathBuf>,
+
+        /// Keep the temporary scaffold directory after the build completes.
+        #[arg(long)]
+        keep_scaffold: bool,
+
+        #[arg(short, long, conflicts_with = "verbose")]
+        quiet: bool,
+
+        #[arg(short, long)]
+        verbose: bool,
+    },
+    /// Add a JavaScript dependency to the current tau project.
+    Add {
+        /// Package name (passed through to pnpm/npm). Examples: `cannon-es`, `three@0.169.0`.
+        package: String,
+
+        #[arg(short, long, conflicts_with = "verbose")]
+        quiet: bool,
+
         #[arg(short, long)]
         verbose: bool,
     },

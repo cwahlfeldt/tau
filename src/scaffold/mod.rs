@@ -30,6 +30,16 @@ const LIB_TMPL: &str = include_str!("templates/lib.rs.tmpl");
 const BUILD_TMPL: &str = include_str!("templates/build.rs.tmpl");
 const ICON_PNG: &[u8] = include_bytes!("templates/icon.png");
 
+// Game project templates — used by `tau create` to scaffold a new game.
+// These are the user-facing files that live in their project, not in the
+// generated Tauri scaffold.
+pub(crate) const GAME_INDEX_HTML_TMPL: &str = include_str!("templates/game/index.html.tmpl");
+pub(crate) const GAME_GAME_JS: &str = include_str!("templates/game/game.js");
+pub(crate) const GAME_PACKAGE_JSON_TMPL: &str = include_str!("templates/game/package.json.tmpl");
+pub(crate) const GAME_VITE_CONFIG: &str = include_str!("templates/game/vite.config.js");
+pub(crate) const GAME_GITIGNORE: &str = include_str!("templates/game/gitignore");
+pub(crate) const GAME_PNPM_WORKSPACE: &str = include_str!("templates/game/pnpm-workspace.yaml");
+
 /// All paths inside the generated scaffold, derived once from the project root.
 struct Layout {
     src_tauri: PathBuf,
@@ -87,11 +97,28 @@ pub fn create_for_url(project_dir: &Path, cfg: &Config, url: &str) -> Result<()>
     Ok(())
 }
 
+/// Scaffold a Tauri project that talks to a local dev server (Vite) during
+/// `tauri dev`. `frontendDist` still has to exist at scaffold time — we point
+/// it at the same stub the URL flow uses — but `devUrl` is what Tauri actually
+/// loads in the webview when running `cargo tauri dev`.
+pub fn create_for_dev_server(project_dir: &Path, cfg: &Config, dev_url: &str) -> Result<()> {
+    let layout = Layout::new(project_dir);
+    layout.ensure_dirs()?;
+
+    let stub_dir = project_dir.join("dist");
+    std::fs::create_dir_all(&stub_dir).with_context(|| format!("create dir {}", stub_dir.display()))?;
+    write_bytes(&stub_dir.join("index.html"), URL_STUB_HTML.as_bytes())?;
+
+    write_src_tauri(&layout, cfg, FrontendSource::DevServer { url: dev_url, stub_dir: &stub_dir })?;
+    Ok(())
+}
+
 const URL_STUB_HTML: &str = "<!doctype html><meta charset=\"utf-8\"><title>tau</title>";
 
 enum FrontendSource<'a> {
     Local(&'a Path),
     Url { url: &'a str, stub_dir: &'a Path },
+    DevServer { url: &'a str, stub_dir: &'a Path },
 }
 
 fn write_src_tauri(layout: &Layout, cfg: &Config, frontend: FrontendSource<'_>) -> Result<()> {
@@ -110,11 +137,11 @@ fn write_src_tauri(layout: &Layout, cfg: &Config, frontend: FrontendSource<'_>) 
     Ok(())
 }
 
-fn write_text(path: &Path, contents: &str) -> Result<()> {
+pub(crate) fn write_text(path: &Path, contents: &str) -> Result<()> {
     std::fs::write(path, contents).with_context(|| format!("write {}", path.display()))
 }
 
-fn write_bytes(path: &Path, contents: &[u8]) -> Result<()> {
+pub(crate) fn write_bytes(path: &Path, contents: &[u8]) -> Result<()> {
     std::fs::write(path, contents).with_context(|| format!("write {}", path.display()))
 }
 
@@ -126,7 +153,7 @@ fn write_json(path: &Path, value: &Value) -> Result<()> {
 
 /// Minimal `{key}` substitution. We don't need a real template engine and a
 /// dependency-free helper keeps the JSON/Toml templates readable.
-fn render(template: &str, vars: &[(&str, &str)]) -> String {
+pub(crate) fn render(template: &str, vars: &[(&str, &str)]) -> String {
     let mut out = template.to_string();
     for (k, v) in vars {
         out = out.replace(&format!("{{{}}}", k), v);
@@ -153,13 +180,21 @@ fn tauri_conf(cfg: &Config, frontend: &FrontendSource<'_>) -> Value {
     }
 
     let frontend_dist = frontend_dist_value(frontend);
+    let mut build = json!({ "frontendDist": frontend_dist });
+    // `devUrl` only applies during `cargo tauri dev` — production builds still
+    // bundle the contents of frontendDist, which for the dev-server flow is
+    // a stub. The project-aware build path runs `vite build` first and points
+    // a fresh scaffold's frontendDist at the real `dist/`.
+    if let FrontendSource::DevServer { url, .. } = frontend {
+        build["devUrl"] = Value::String((*url).to_string());
+    }
 
     json!({
         "$schema": "https://schema.tauri.app/config/2",
         "productName": cfg.name,
         "version": cfg.version,
         "identifier": cfg.identifier,
-        "build": { "frontendDist": frontend_dist },
+        "build": build,
         "app": {
             "windows": [window],
             "security": { "csp": null },
@@ -177,11 +212,12 @@ fn tauri_conf(cfg: &Config, frontend: &FrontendSource<'_>) -> Value {
 
 /// `frontendDist` is interpreted relative to `src-tauri/`. Absolute paths
 /// work too, which is what we want for both the user's source dir (anywhere
-/// on disk) and the URL-mode stub (sibling of `src-tauri/`).
+/// on disk) and the URL/dev-server stub (sibling of `src-tauri/`).
 fn frontend_dist_value(frontend: &FrontendSource<'_>) -> String {
     match frontend {
         FrontendSource::Local(p) => p.display().to_string(),
         FrontendSource::Url { stub_dir, .. } => stub_dir.display().to_string(),
+        FrontendSource::DevServer { stub_dir, .. } => stub_dir.display().to_string(),
     }
 }
 
@@ -251,6 +287,19 @@ mod tests {
         );
         assert_eq!(v["app"]["windows"][0]["url"], serde_json::json!("https://example.com"));
         assert_eq!(v["build"]["frontendDist"], serde_json::json!("/tmp/stub"));
+    }
+
+    #[test]
+    fn tauri_conf_sets_dev_url_for_dev_server() {
+        let v = tauri_conf(
+            &sample_cfg(),
+            &FrontendSource::DevServer { url: "http://127.0.0.1:1420", stub_dir: Path::new("/tmp/stub") },
+        );
+        assert_eq!(v["build"]["devUrl"], serde_json::json!("http://127.0.0.1:1420"));
+        assert_eq!(v["build"]["frontendDist"], serde_json::json!("/tmp/stub"));
+        // dev-server flow drives the webview via Tauri's devUrl, not a window URL —
+        // window URL is reserved for the remote-wrap (Url) flow.
+        assert!(v["app"]["windows"][0].get("url").is_none());
     }
 
     #[test]

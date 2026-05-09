@@ -1,0 +1,4 @@
+.tau/node_modules/
+.tau/dist/
+build/
+.DS_Store

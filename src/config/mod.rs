@@ -14,7 +14,7 @@ mod platform;
 
 pub use platform::{ArtifactPolicy, Platform};
 
-const DEFAULT_NAME: &str = "WrappedApp";
+pub(crate) const DEFAULT_NAME: &str = "WrappedApp";
 const DEFAULT_VERSION: &str = "0.1.0";
 const DEFAULT_OUTPUT: &str = "./build";
 const DEFAULT_CONFIG_FILE: &str = "tau.conf.json";
@@ -216,7 +216,7 @@ fn discover_config(cwd: &Path, index_dir: Option<&Path>) -> Option<PathBuf> {
     None
 }
 
-fn default_identifier(name: &str) -> String {
+pub(crate) fn default_identifier(name: &str) -> String {
     let slug: String = name
         .chars()
         .filter(|c| c.is_ascii_alphanumeric())

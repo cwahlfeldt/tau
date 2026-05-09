@@ -1,26 +1,44 @@
-//! `tau dev` — fast iteration via `cargo tauri dev`. Reuses config
-//! resolution and scaffolding from the wrap pipeline; replaces the
-//! build+extract tail with a long-lived interactive `cargo tauri dev`
-//! session.
+//! `tau dev` — fast iteration via `cargo tauri dev`.
 //!
-//! Tauri serves files directly from `frontendDist` (the user's source
-//! directory). Reload the webview to pick up changes — no watcher,
-//! no livereload shim.
+//! Two modes:
+//!
+//! - **Project mode** (no positional `index`, `discover_project` succeeds):
+//!   spawn Vite in `.tau/`, wait for it to come up on 127.0.0.1:1420, then
+//!   scaffold a Tauri project whose `devUrl` points at Vite. Tauri loads the
+//!   webview from there during dev — Vite handles HMR, asset serving,
+//!   bare-import resolution.
+//!
+//! - **Legacy mode** (positional `index` provided, or no project found):
+//!   today's behavior — scaffold pointing `frontendDist` at the user's source
+//!   tree, spawn `cargo tauri dev`. No Vite. No HMR (just reload the webview).
+//!
+//! Tauri serves files directly from `frontendDist` in legacy mode. Reload
+//! the webview to pick up changes — no watcher, no livereload shim.
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
+use std::net::TcpStream;
 use std::path::PathBuf;
+use std::process::Child;
 use std::str::FromStr;
+use std::time::{Duration, Instant};
 
 use crate::build::{ensure_targets, MobileFlavor, TauriCmd};
 use crate::cache;
 use crate::cli::Cli;
 use crate::config::{self, Platform};
-use crate::input::Input;
+use crate::input::{self, Input, ProjectRoot};
 use crate::log::{Level, Logger};
 use crate::scaffold;
+use crate::tooling;
+
+/// Vite's bind. Hard-coded to match the template `vite.config.js`. If we ever
+/// make the port configurable, both ends need to move together.
+const DEV_HOST: &str = "127.0.0.1";
+const DEV_PORT: u16 = 1420;
+const DEV_URL: &str = "http://127.0.0.1:1420";
 
 pub struct DevArgs {
-    pub index: PathBuf,
+    pub index: Option<PathBuf>,
     pub platform: Option<String>,
     pub name: Option<String>,
     pub identifier: Option<String>,
@@ -42,13 +60,107 @@ pub fn run(args: DevArgs) -> Result<()> {
 
     let platform = resolve_platform(args.platform.as_deref())?;
 
-    let raw = args
-        .index
-        .to_str()
-        .context("index argument is not valid UTF-8")?;
+    // Decide which mode to run in. Explicit positional argument always wins —
+    // if the user passes `tau dev path/to/index.html`, never try to discover.
+    if let Some(index_path) = &args.index {
+        return run_legacy(&args, index_path.clone(), platform, &log);
+    }
+    let cwd = std::env::current_dir()?;
+    if let Some(project) = input::discover_project(&cwd) {
+        return run_project(&args, project, platform, &log);
+    }
+    Err(anyhow!(
+        "no tau project found in `{}` or any parent, and no index path was provided.\n\
+         Run `tau create <name>` to scaffold one, or pass `tau dev <path/to/index.html>` to wrap an existing file.",
+        cwd.display()
+    ))
+}
+
+/// Project mode: Vite + Tauri devUrl.
+fn run_project(args: &DevArgs, project: ProjectRoot, platform: Platform, log: &Logger) -> Result<()> {
+    log.heading("tau dev");
+    log.detail("project", &project.root.display().to_string());
+
+    tooling::ensure_node_present()?;
+    let pm = tooling::detect_package_manager()?;
+    log.detail("package manager", pm.label());
+
+    if !project.tau_dir.join("node_modules").is_dir() {
+        log.detail("install", "node_modules missing — installing first");
+        tooling::install(pm, &project.tau_dir, log)?;
+    }
+
+    // Resolve config relative to the project root, not cwd. This means
+    // `tau dev` in a subdirectory still finds tau.conf.json at the root.
+    let synthetic = synthesize_cli(args, platform);
+    let mut cfg = config::resolve(&project.root, Some(&project.root), &synthetic)?;
+    if synthetic.name.is_none() && cfg.name == config::DEFAULT_NAME {
+        if let Some(stem) = project.root.file_name().and_then(|s| s.to_str()) {
+            cfg.name = stem.to_string();
+            if synthetic.identifier.is_none() {
+                cfg.identifier = config::default_identifier(&cfg.name);
+            }
+        }
+    }
+    cfg.platforms = vec![platform];
+
+    log.detail("app", &cfg.name);
+    log.detail("identifier", &cfg.identifier);
+    log.detail("platform", platform.as_str());
+
+    let workdir = tempfile::Builder::new()
+        .prefix("tau-dev-")
+        .tempdir()
+        .context("failed to create temp working directory")?;
+    let scaffold_dir = workdir.path().to_path_buf();
+    scaffold::create_for_dev_server(&scaffold_dir, &cfg, DEV_URL)?;
+    log.detail("scaffold", &scaffold_dir.display().to_string());
+
+    ensure_targets(platform, log)?;
+    let target_dir = cache::dir()?;
+
+    // Spawn Vite first; Tauri only points the webview at it once it's up.
+    log.heading("Starting Vite dev server");
+    let mut vite_child = tooling::vite_dev(pm, &project.tau_dir, log)?;
+
+    // If we exit this function before tauri starts, the Vite child must die
+    // with us — drop guard pattern.
+    let mut vite_guard = ChildGuard::new(&mut vite_child);
+
+    if let Err(e) = wait_for_dev_server(DEV_HOST, DEV_PORT, Duration::from_secs(15)) {
+        return Err(e.context("Vite dev server didn't come up"));
+    }
+    log.detail("vite", &format!("ready at {}", DEV_URL));
+
+    log.heading("Starting Tauri webview");
+    let tauri = TauriCmd::new(&scaffold_dir, &target_dir, log);
+    let mut tauri_child = match MobileFlavor::from_platform(platform) {
+        None => tauri.spawn_dev_desktop()?,
+        Some(flavor) => tauri.spawn_dev_mobile(flavor)?,
+    };
+    let status = tauri_child.wait().context("failed to wait on cargo tauri dev")?;
+
+    // Tauri exited — kill Vite explicitly. Without this it lingers as a
+    // background process owning port 1420, which silently breaks the next
+    // dev session.
+    vite_guard.kill();
+
+    if args.keep_scaffold {
+        let kept = workdir.keep();
+        log.done(&format!("Scaffold preserved at {}", kept.display()));
+    }
+    if !status.success() {
+        bail!("cargo tauri dev exited with status {}", status);
+    }
+    Ok(())
+}
+
+/// Legacy mode: today's behavior (no Vite).
+fn run_legacy(args: &DevArgs, index: PathBuf, platform: Platform, log: &Logger) -> Result<()> {
+    let raw = index.to_str().context("index argument is not valid UTF-8")?;
     let input = Input::parse(raw)?;
 
-    let synthetic = synthesize_cli(&args, platform);
+    let synthetic = synthesize_cli(args, platform);
     let cwd = std::env::current_dir()?;
     let index_dir = match &input {
         Input::File { source_root, .. } => Some(source_root.as_path()),
@@ -79,28 +191,65 @@ pub fn run(args: DevArgs) -> Result<()> {
     }
     log.detail("scaffold", &project_dir.display().to_string());
 
-    ensure_targets(platform, &log)?;
-
+    ensure_targets(platform, log)?;
     let target_dir = cache::dir()?;
     log.detail("cache", &target_dir.display().to_string());
 
-    let tauri = TauriCmd::new(&project_dir, &target_dir, &log);
+    let tauri = TauriCmd::new(&project_dir, &target_dir, log);
     let mut child = match MobileFlavor::from_platform(platform) {
         None => tauri.spawn_dev_desktop()?,
         Some(flavor) => tauri.spawn_dev_mobile(flavor)?,
     };
-
     let status = child.wait().context("failed to wait on cargo tauri dev")?;
 
     if args.keep_scaffold {
         let kept = workdir.keep();
         log.done(&format!("Scaffold preserved at {}", kept.display()));
     }
-
     if !status.success() {
-        anyhow::bail!("cargo tauri dev exited with status {}", status);
+        bail!("cargo tauri dev exited with status {}", status);
     }
     Ok(())
+}
+
+/// Poll a TCP port until it accepts connections, or `timeout` elapses.
+fn wait_for_dev_server(host: &str, port: u16, timeout: Duration) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+    let addr = format!("{}:{}", host, port);
+    while Instant::now() < deadline {
+        if TcpStream::connect_timeout(&addr.parse().unwrap(), Duration::from_millis(500)).is_ok() {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(150));
+    }
+    bail!("timed out waiting for dev server at {}", addr)
+}
+
+/// Make sure a child process is killed if we exit early. The actual `wait`
+/// call still happens via the caller — this guard only fires if a `?` causes
+/// the function to return without calling `kill()` explicitly.
+struct ChildGuard<'a> {
+    child: &'a mut Child,
+    armed: bool,
+}
+
+impl<'a> ChildGuard<'a> {
+    fn new(child: &'a mut Child) -> Self {
+        Self { child, armed: true }
+    }
+    fn kill(&mut self) {
+        if self.armed {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            self.armed = false;
+        }
+    }
+}
+
+impl Drop for ChildGuard<'_> {
+    fn drop(&mut self) {
+        self.kill();
+    }
 }
 
 fn resolve_platform(arg: Option<&str>) -> Result<Platform> {
@@ -133,7 +282,7 @@ mod tests {
 
     fn empty_args() -> DevArgs {
         DevArgs {
-            index: PathBuf::from("index.html"),
+            index: Some(PathBuf::from("index.html")),
             platform: None,
             name: None,
             identifier: None,

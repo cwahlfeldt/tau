@@ -1,23 +1,31 @@
 mod build;
+mod build_project;
 mod cache;
 mod cli;
 mod config;
+mod create;
 mod dev;
 mod filter;
 mod input;
 mod log;
 mod pipeline;
 mod scaffold;
+mod tooling;
 
 use anyhow::{Context, Result};
 use clap::Parser;
 
 use crate::cli::{CacheAction, Cli, Command};
+use crate::log::{Level, Logger};
 
 fn main() -> Result<()> {
     let args = Cli::parse();
     match args.command {
         Some(Command::Cache { action }) => run_cache(&action),
+        Some(Command::Create { name, quiet, verbose }) => {
+            let log = Logger::new(level_from(quiet, verbose));
+            create::run(name, &log)
+        }
         Some(Command::Dev {
             index,
             platform,
@@ -37,7 +45,39 @@ fn main() -> Result<()> {
             quiet,
             verbose,
         }),
+        Some(Command::Build {
+            release,
+            platform,
+            name,
+            identifier,
+            output,
+            config,
+            keep_scaffold,
+            quiet,
+            verbose,
+        }) => build_project::run(build_project::BuildArgs {
+            release,
+            platform,
+            name,
+            identifier,
+            output,
+            config,
+            keep_scaffold,
+            quiet,
+            verbose,
+        }),
+        Some(Command::Add { package, quiet, verbose }) => build_project::run_add(package, quiet, verbose),
         None => pipeline::run(args),
+    }
+}
+
+fn level_from(quiet: bool, verbose: bool) -> Level {
+    if quiet {
+        Level::Quiet
+    } else if verbose {
+        Level::Verbose
+    } else {
+        Level::Normal
     }
 }
 
