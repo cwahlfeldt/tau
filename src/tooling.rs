@@ -129,8 +129,13 @@ pub fn add(pm: PackageManager, cwd: &Path, pkg: &str, log: &Logger) -> Result<()
 
 /// Spawn a Vite dev server (`<pm> run dev`) in the background. Returns the
 /// child handle so the caller can wait/kill alongside `cargo tauri dev`.
-/// Stdio inherits — Vite's startup banner is useful and goes to the same
-/// terminal as Tauri's logs.
+/// stdout/stderr inherit — Vite's startup banner and HMR logs are useful
+/// and go to the same terminal as Tauri's logs. stdin is redirected from
+/// the TTY: Vite's interactive shortcuts (`r/u/o/c/q`) put the terminal
+/// into a raw/extended-keys mode that doesn't get fully restored when we
+/// kill Vite, leaving the user's terminal echoing CSI escape sequences
+/// (`[[99;5u` etc.) on every Ctrl+C until they `reset(1)`. Detaching from
+/// the TTY tells Vite to skip raw-mode setup entirely.
 pub fn vite_dev(pm: PackageManager, cwd: &Path, log: &Logger) -> Result<Child> {
     let label = format!("{} run dev", pm.label());
     log.command(&label);
@@ -138,6 +143,7 @@ pub fn vite_dev(pm: PackageManager, cwd: &Path, log: &Logger) -> Result<Child> {
         .arg("run")
         .arg("dev")
         .current_dir(cwd)
+        .stdin(Stdio::null())
         .spawn()
         .with_context(|| format!("failed to spawn `{}`", pm.label()))
 }

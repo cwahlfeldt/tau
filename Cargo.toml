@@ -17,6 +17,7 @@ anyhow = "1"
 walkdir = "2"
 tempfile = "3"
 globset = "0.4"
+ctrlc = "3"
 
 [profile.release]
 lto = true

@@ -42,6 +42,16 @@ export default defineConfig({
     port: 1420,
     strictPort: true,
     host: '127.0.0.1',
+    // Vite's HMR client tries to auto-detect the WebSocket URL from
+    // window.location, which inside a Tauri webview points at the wrong
+    // origin (tauri://localhost on macOS, http://tauri.localhost on Windows).
+    // The connection fails silently and the webview just sits there. Pinning
+    // the HMR client to the same host:port the dev server binds to fixes it.
+    hmr: {
+      protocol: 'ws',
+      host: '127.0.0.1',
+      port: 1420,
+    },
     fs: {
       // Vite restricts dev-server file serving to `root` and a few defaults.
       // Since node_modules is outside `root`, opt into serving from the

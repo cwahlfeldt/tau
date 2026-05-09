@@ -20,6 +20,8 @@ use std::net::TcpStream;
 use std::path::PathBuf;
 use std::process::Child;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::build::{ensure_targets, MobileFlavor, TauriCmd};
@@ -119,12 +121,23 @@ fn run_project(args: &DevArgs, project: ProjectRoot, platform: Platform, log: &L
     ensure_targets(platform, log)?;
     let target_dir = cache::dir()?;
 
+    // Install a SIGINT handler before spawning children. Without this, Rust's
+    // default behavior is to die on the first Ctrl+C, leaving Vite/Tauri
+    // orphaned (still owning port 1420 and the webview). With the handler,
+    // we observe Ctrl+C as a flag flip and orchestrate a coordinated kill.
+    // ctrlc::set_handler returns Err if a handler is already installed —
+    // that's fine, dev mode is one-per-process.
+    let shutdown = Arc::new(AtomicBool::new(false));
+    {
+        let flag = shutdown.clone();
+        let _ = ctrlc::set_handler(move || {
+            flag.store(true, Ordering::SeqCst);
+        });
+    }
+
     // Spawn Vite first; Tauri only points the webview at it once it's up.
     log.heading("Starting Vite dev server");
     let mut vite_child = tooling::vite_dev(pm, &project.tau_dir, log)?;
-
-    // If we exit this function before tauri starts, the Vite child must die
-    // with us — drop guard pattern.
     let mut vite_guard = ChildGuard::new(&mut vite_child);
 
     if let Err(e) = wait_for_dev_server(DEV_HOST, DEV_PORT, Duration::from_secs(15)) {
@@ -138,9 +151,29 @@ fn run_project(args: &DevArgs, project: ProjectRoot, platform: Platform, log: &L
         None => tauri.spawn_dev_desktop()?,
         Some(flavor) => tauri.spawn_dev_mobile(flavor)?,
     };
-    let status = tauri_child.wait().context("failed to wait on cargo tauri dev")?;
 
-    // Tauri exited — kill Vite explicitly. Without this it lingers as a
+    // Poll loop: exit when *either* Tauri exits on its own (closed window,
+    // crash, etc.) or the user hits Ctrl+C. `try_wait()` returns Ok(Some(_))
+    // once the process is reaped; it never blocks. A 100ms tick keeps Ctrl+C
+    // responsive without burning CPU.
+    let status = loop {
+        if shutdown.load(Ordering::SeqCst) {
+            log.detail("shutdown", "Ctrl+C received, stopping…");
+            let _ = tauri_child.kill();
+            // Wait for Tauri to actually go away so the cargo build state
+            // isn't left half-written. The cargo subprocess catches SIGTERM
+            // and tears down its own children (the running webview app).
+            let _ = tauri_child.wait();
+            break None;
+        }
+        match tauri_child.try_wait() {
+            Ok(Some(s)) => break Some(s),
+            Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+            Err(e) => return Err(anyhow::Error::new(e).context("failed to poll cargo tauri dev")),
+        }
+    };
+
+    // Tauri is gone. Kill Vite explicitly — without this it lingers as a
     // background process owning port 1420, which silently breaks the next
     // dev session.
     vite_guard.kill();
@@ -149,10 +182,11 @@ fn run_project(args: &DevArgs, project: ProjectRoot, platform: Platform, log: &L
         let kept = workdir.keep();
         log.done(&format!("Scaffold preserved at {}", kept.display()));
     }
-    if !status.success() {
-        bail!("cargo tauri dev exited with status {}", status);
+
+    match status {
+        Some(s) if !s.success() => bail!("cargo tauri dev exited with status {}", s),
+        _ => Ok(()),
     }
-    Ok(())
 }
 
 /// Legacy mode: today's behavior (no Vite).
@@ -195,21 +229,45 @@ fn run_legacy(args: &DevArgs, index: PathBuf, platform: Platform, log: &Logger) 
     let target_dir = cache::dir()?;
     log.detail("cache", &target_dir.display().to_string());
 
+    // Same Ctrl+C orchestration as project mode (one child here, but the
+    // graceful-shutdown problem is the same).
+    let shutdown = Arc::new(AtomicBool::new(false));
+    {
+        let flag = shutdown.clone();
+        let _ = ctrlc::set_handler(move || {
+            flag.store(true, Ordering::SeqCst);
+        });
+    }
+
     let tauri = TauriCmd::new(&project_dir, &target_dir, log);
     let mut child = match MobileFlavor::from_platform(platform) {
         None => tauri.spawn_dev_desktop()?,
         Some(flavor) => tauri.spawn_dev_mobile(flavor)?,
     };
-    let status = child.wait().context("failed to wait on cargo tauri dev")?;
+
+    let status = loop {
+        if shutdown.load(Ordering::SeqCst) {
+            log.detail("shutdown", "Ctrl+C received, stopping…");
+            let _ = child.kill();
+            let _ = child.wait();
+            break None;
+        }
+        match child.try_wait() {
+            Ok(Some(s)) => break Some(s),
+            Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+            Err(e) => return Err(anyhow::Error::new(e).context("failed to poll cargo tauri dev")),
+        }
+    };
 
     if args.keep_scaffold {
         let kept = workdir.keep();
         log.done(&format!("Scaffold preserved at {}", kept.display()));
     }
-    if !status.success() {
-        bail!("cargo tauri dev exited with status {}", status);
+
+    match status {
+        Some(s) if !s.success() => bail!("cargo tauri dev exited with status {}", s),
+        _ => Ok(()),
     }
-    Ok(())
 }
 
 /// Poll a TCP port until it accepts connections, or `timeout` elapses.
