@@ -12,28 +12,34 @@ use anyhow::{anyhow, bail, Context, Result};
 use std::path::PathBuf;
 
 use crate::build;
-use crate::cli::Cli;
-use crate::config;
+use crate::cli::BuildFlags;
+use crate::config::{self, Overrides};
 use crate::input;
-use crate::log::{Level, Logger};
+use crate::log::Logger;
 use crate::scaffold;
 use crate::tooling;
 
 pub struct BuildArgs {
-    pub release: bool,
+    pub build: BuildFlags,
     pub platform: Vec<String>,
-    pub name: Option<String>,
-    pub identifier: Option<String>,
-    pub output: Option<PathBuf>,
-    pub config: Option<PathBuf>,
-    pub keep_scaffold: bool,
-    pub quiet: bool,
-    pub verbose: bool,
+    pub log: Logger,
+}
+
+impl BuildArgs {
+    fn overrides(&self) -> Overrides {
+        Overrides {
+            name: self.build.name.clone(),
+            identifier: self.build.identifier.clone(),
+            output: self.build.output.clone(),
+            config: self.build.config.clone(),
+            platforms: self.platform.clone(),
+            release: self.build.release,
+        }
+    }
 }
 
 pub fn run(args: BuildArgs) -> Result<()> {
-    let level = if args.quiet { Level::Quiet } else if args.verbose { Level::Verbose } else { Level::Normal };
-    let log = Logger::new(level);
+    let log = &args.log;
 
     let cwd = std::env::current_dir().context("could not determine current directory")?;
     let project = input::discover_project(&cwd).ok_or_else(|| {
@@ -56,11 +62,11 @@ pub fn run(args: BuildArgs) -> Result<()> {
     // freshness — the package manager handles that.
     if !project.tau_dir.join("node_modules").is_dir() {
         log.detail("install", "node_modules missing — installing first");
-        tooling::install(pm, &project.tau_dir, &log)?;
+        tooling::install(pm, &project.tau_dir, log)?;
     }
 
     log.heading("Bundling frontend");
-    tooling::vite_build(pm, &project.tau_dir, &log)?;
+    tooling::vite_build(pm, &project.tau_dir, log)?;
     if !project.dist_dir.is_dir() {
         bail!(
             "vite build completed but {} was not created",
@@ -69,25 +75,10 @@ pub fn run(args: BuildArgs) -> Result<()> {
     }
     log.detail("dist", &project.dist_dir.display().to_string());
 
-    // Synthesize a Cli so we can reuse the same three-tier config resolver.
     // index_dir is the project root — that's where any tau.conf.json lives.
-    let synthetic = synthesize_cli(&args);
-    let cfg = {
-        let mut c = config::resolve(&project.root, Some(&project.root), &synthetic)?;
-        // If neither --name nor tau.conf.json supplied a name, fall back to
-        // the project directory name. The legacy wrap flow doesn't have this
-        // luxury (it doesn't know the project), so config::resolve still
-        // defaults to "WrappedApp" — only override here.
-        if synthetic.name.is_none() && c.name == config::DEFAULT_NAME {
-            if let Some(stem) = project.root.file_name().and_then(|s| s.to_str()) {
-                c.name = stem.to_string();
-                if synthetic.identifier.is_none() {
-                    c.identifier = config::default_identifier(&c.name);
-                }
-            }
-        }
-        c
-    };
+    let overrides = args.overrides();
+    let mut cfg = config::resolve(&project.root, Some(&project.root), &overrides)?;
+    config::apply_project_name_fallback(&mut cfg, &project.root, &overrides);
 
     log.detail("app", &cfg.name);
     log.detail("identifier", &cfg.identifier);
@@ -113,56 +104,17 @@ pub fn run(args: BuildArgs) -> Result<()> {
 
     for platform in &cfg.platforms {
         log.heading(&format!("Building {}", platform.as_str()));
-        build::ensure_targets(*platform, &log)?;
-        let artifacts = build::build_platform(&scaffold_dir, *platform, &cfg, &log)?;
+        build::ensure_targets(*platform, log)?;
+        let artifacts = build::build_platform(&scaffold_dir, *platform, &cfg, log)?;
         for path in build::extract_artifacts(&artifacts, &output_dir, &cfg, *platform)? {
             log.artifact(&path);
         }
     }
 
-    if args.keep_scaffold {
+    if args.build.keep_scaffold {
         let kept = workdir.keep();
         log.done(&format!("Scaffold preserved at {}", kept.display()));
     }
     log.done(&format!("Done. Artifacts in {}", output_dir.display()));
-    Ok(())
-}
-
-fn synthesize_cli(args: &BuildArgs) -> Cli {
-    Cli {
-        index: None,
-        release: args.release,
-        platform: args.platform.clone(),
-        name: args.name.clone(),
-        identifier: args.identifier.clone(),
-        output: args.output.clone(),
-        config: args.config.clone(),
-        dry_run: false,
-        keep_scaffold: false,
-        quiet: args.quiet,
-        verbose: args.verbose,
-        command: None,
-    }
-}
-
-/// `tau add <pkg>` — wraps the package manager's `add` command. Lives here
-/// because the only thing it shares with build is "discover project, run a
-/// command in .tau/."
-pub fn run_add(package: String, quiet: bool, verbose: bool) -> Result<()> {
-    let level = if quiet { Level::Quiet } else if verbose { Level::Verbose } else { Level::Normal };
-    let log = Logger::new(level);
-    let cwd = std::env::current_dir().context("could not determine current directory")?;
-    let project = input::discover_project(&cwd).ok_or_else(|| {
-        anyhow!(
-            "no tau project found in `{}` or any parent. `tau add` only works inside a project created by `tau create`.",
-            cwd.display()
-        )
-    })?;
-    tooling::ensure_node_present()?;
-    let pm = tooling::detect_package_manager()?;
-    log.heading(&format!("Adding {}", package));
-    log.detail("project", &project.root.display().to_string());
-    tooling::add(pm, &project.tau_dir, &package, &log)?;
-    log.done(&format!("Installed {} in {}", package, project.tau_dir.display()));
     Ok(())
 }

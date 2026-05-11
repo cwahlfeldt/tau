@@ -9,13 +9,14 @@ use anyhow::{anyhow, Context, Result};
 use std::path::PathBuf;
 
 use crate::cli::Cli;
+use crate::config::Overrides;
 use crate::filter;
 use crate::input::Input;
 use crate::log::Logger;
 use crate::{build, config, scaffold};
 
 pub fn run(args: Cli) -> Result<()> {
-    let log = Logger::new(args.log_level());
+    let log = Logger::new(args.common.level());
     let inputs = Inputs::resolve(&args)?;
 
     log_header(&log, &inputs);
@@ -73,7 +74,7 @@ pub fn run(args: Cli) -> Result<()> {
         }
     }
 
-    if args.keep_scaffold {
+    if args.build.keep_scaffold {
         let kept = workdir.keep();
         log.done(&format!("Scaffold preserved at {}", kept.display()));
     }
@@ -107,7 +108,15 @@ impl Inputs {
             Input::File { source_root, .. } => Some(source_root.as_path()),
             Input::Url(_) => None,
         };
-        let cfg = config::resolve(&cwd, index_dir, args)?;
+        let overrides = Overrides {
+            name: args.build.name.clone(),
+            identifier: args.build.identifier.clone(),
+            output: args.build.output.clone(),
+            config: args.build.config.clone(),
+            platforms: args.platform.clone(),
+            release: args.build.release,
+        };
+        let cfg = config::resolve(&cwd, index_dir, &overrides)?;
 
         Ok(Self { input, cfg })
     }

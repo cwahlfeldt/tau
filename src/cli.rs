@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 
 use crate::log::Level;
@@ -6,7 +6,7 @@ use crate::log::Level;
 /// Top-level CLI. The default (subcommand-less) invocation wraps an
 /// `index.html` (or remote URL) — this preserves the original
 /// `tau <index>` form. Subcommands are reserved for adjacent operations
-/// (e.g. `cache`).
+/// (e.g. `cache`, `create`, `dev`, `build`, `add`).
 #[derive(Parser, Debug)]
 #[command(
     name = "tau",
@@ -20,13 +20,54 @@ pub struct Cli {
     /// (required when not using a subcommand)
     pub index: Option<PathBuf>,
 
-    /// Build with the release profile (optimized + stripped). Unsigned.
-    #[arg(long)]
-    pub release: bool,
+    #[command(flatten)]
+    pub build: BuildFlags,
 
     /// Comma-separated list of target platforms: macos, windows, linux, android, ios
     #[arg(short, long, value_delimiter = ',')]
     pub platform: Vec<String>,
+
+    /// Generate the scaffold and print its path, but do not run the build.
+    #[arg(long)]
+    pub dry_run: bool,
+
+    #[command(flatten)]
+    pub common: CommonFlags,
+
+    #[command(subcommand)]
+    pub command: Option<Command>,
+}
+
+/// Flags shared by every subcommand that produces output.
+#[derive(Args, Debug, Default, Clone)]
+pub struct CommonFlags {
+    /// Suppress all non-error output.
+    #[arg(short, long, conflicts_with = "verbose", global = true)]
+    pub quiet: bool,
+
+    /// Show extra output.
+    #[arg(short, long, global = true)]
+    pub verbose: bool,
+}
+
+impl CommonFlags {
+    pub fn level(&self) -> Level {
+        if self.quiet {
+            Level::Quiet
+        } else if self.verbose {
+            Level::Verbose
+        } else {
+            Level::Normal
+        }
+    }
+}
+
+/// Flags shared by the wrap/dev/build paths that drive a Tauri scaffold.
+#[derive(Args, Debug, Default, Clone)]
+pub struct BuildFlags {
+    /// Build with the release profile (optimized + stripped). Unsigned.
+    #[arg(long)]
+    pub release: bool,
 
     /// Override the app name
     #[arg(long)]
@@ -44,36 +85,9 @@ pub struct Cli {
     #[arg(long)]
     pub config: Option<PathBuf>,
 
-    /// Generate the scaffold and print its path, but do not run the build.
-    #[arg(long)]
-    pub dry_run: bool,
-
     /// Keep the temporary scaffold directory after the build completes.
     #[arg(long)]
     pub keep_scaffold: bool,
-
-    /// Suppress all non-error output.
-    #[arg(short, long, conflicts_with = "verbose")]
-    pub quiet: bool,
-
-    /// (Reserved) Show extra output. Currently behaves like normal.
-    #[arg(short, long)]
-    pub verbose: bool,
-
-    #[command(subcommand)]
-    pub command: Option<Command>,
-}
-
-impl Cli {
-    pub fn log_level(&self) -> Level {
-        if self.quiet {
-            Level::Quiet
-        } else if self.verbose {
-            Level::Verbose
-        } else {
-            Level::Normal
-        }
-    }
 }
 
 #[derive(Subcommand, Debug)]
@@ -87,14 +101,6 @@ pub enum Command {
     Create {
         /// Project name. Becomes the directory name and the default app name.
         name: String,
-
-        /// Suppress all non-error output.
-        #[arg(short, long, conflicts_with = "verbose")]
-        quiet: bool,
-
-        /// Show extra output.
-        #[arg(short, long)]
-        verbose: bool,
     },
     /// Run a tau project in dev mode (Vite + Tauri webview), or wrap a
     /// specific index.html / URL the legacy way if one is provided.
@@ -122,61 +128,20 @@ pub enum Command {
         /// Keep the temporary scaffold directory after dev exits.
         #[arg(long)]
         keep_scaffold: bool,
-
-        /// Suppress all non-error output.
-        #[arg(short, long, conflicts_with = "verbose")]
-        quiet: bool,
-
-        /// Show extra output.
-        #[arg(short, long)]
-        verbose: bool,
     },
     /// Build a tau project for distribution (Vite production build + Tauri bundle).
     Build {
-        /// Build with the release profile (optimized + stripped). Unsigned.
-        #[arg(long)]
-        release: bool,
+        #[command(flatten)]
+        build: BuildFlags,
 
         /// Comma-separated list of target platforms: macos, windows, linux, android, ios
         #[arg(short, long, value_delimiter = ',')]
         platform: Vec<String>,
-
-        /// Override the app name
-        #[arg(long)]
-        name: Option<String>,
-
-        /// Override the bundle identifier (e.g. com.example.app)
-        #[arg(long)]
-        identifier: Option<String>,
-
-        /// Override the output directory for built artifacts
-        #[arg(long)]
-        output: Option<PathBuf>,
-
-        /// Path to a tau.conf.json (defaults to <project>/tau.conf.json)
-        #[arg(long)]
-        config: Option<PathBuf>,
-
-        /// Keep the temporary scaffold directory after the build completes.
-        #[arg(long)]
-        keep_scaffold: bool,
-
-        #[arg(short, long, conflicts_with = "verbose")]
-        quiet: bool,
-
-        #[arg(short, long)]
-        verbose: bool,
     },
     /// Add a JavaScript dependency to the current tau project.
     Add {
         /// Package name (passed through to pnpm/npm). Examples: `cannon-es`, `three@0.169.0`.
         package: String,
-
-        #[arg(short, long, conflicts_with = "verbose")]
-        quiet: bool,
-
-        #[arg(short, long)]
-        verbose: bool,
     },
 }
 

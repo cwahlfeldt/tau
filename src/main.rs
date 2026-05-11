@@ -16,16 +16,14 @@ use anyhow::{Context, Result};
 use clap::Parser;
 
 use crate::cli::{CacheAction, Cli, Command};
-use crate::log::{Level, Logger};
+use crate::log::Logger;
 
 fn main() -> Result<()> {
     let args = Cli::parse();
+    let log = Logger::new(args.common.level());
     match args.command {
         Some(Command::Cache { action }) => run_cache(&action),
-        Some(Command::Create { name, quiet, verbose }) => {
-            let log = Logger::new(level_from(quiet, verbose));
-            create::run(name, &log)
-        }
+        Some(Command::Create { name }) => create::run(name, &log),
         Some(Command::Dev {
             index,
             platform,
@@ -33,8 +31,6 @@ fn main() -> Result<()> {
             identifier,
             config,
             keep_scaffold,
-            quiet,
-            verbose,
         }) => dev::run(dev::DevArgs {
             index,
             platform,
@@ -42,42 +38,15 @@ fn main() -> Result<()> {
             identifier,
             config,
             keep_scaffold,
-            quiet,
-            verbose,
+            log,
         }),
-        Some(Command::Build {
-            release,
+        Some(Command::Build { build, platform }) => build_project::run(build_project::BuildArgs {
+            build,
             platform,
-            name,
-            identifier,
-            output,
-            config,
-            keep_scaffold,
-            quiet,
-            verbose,
-        }) => build_project::run(build_project::BuildArgs {
-            release,
-            platform,
-            name,
-            identifier,
-            output,
-            config,
-            keep_scaffold,
-            quiet,
-            verbose,
+            log,
         }),
-        Some(Command::Add { package, quiet, verbose }) => build_project::run_add(package, quiet, verbose),
+        Some(Command::Add { package }) => tooling::run_add(package, &log),
         None => pipeline::run(args),
-    }
-}
-
-fn level_from(quiet: bool, verbose: bool) -> Level {
-    if quiet {
-        Level::Quiet
-    } else if verbose {
-        Level::Verbose
-    } else {
-        Level::Normal
     }
 }
 

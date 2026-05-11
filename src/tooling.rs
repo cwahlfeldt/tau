@@ -10,6 +10,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 
+use crate::input;
 use crate::log::Logger;
 
 /// Minimum Node version we expect. We don't pin Vite hard against this — Vite
@@ -161,6 +162,24 @@ pub fn vite_build(pm: PackageManager, cwd: &Path, log: &Logger) -> Result<()> {
     if !status.success() {
         bail!("{} exited with status {}", label, status);
     }
+    Ok(())
+}
+
+/// `tau add <pkg>` — discover the project and run `<pm> add <pkg>` in `.tau/`.
+pub fn run_add(package: String, log: &Logger) -> Result<()> {
+    let cwd = std::env::current_dir().context("could not determine current directory")?;
+    let project = input::discover_project(&cwd).ok_or_else(|| {
+        anyhow!(
+            "no tau project found in `{}` or any parent. `tau add` only works inside a project created by `tau create`.",
+            cwd.display()
+        )
+    })?;
+    ensure_node_present()?;
+    let pm = detect_package_manager()?;
+    log.heading(&format!("Adding {}", package));
+    log.detail("project", &project.root.display().to_string());
+    add(pm, &project.tau_dir, &package, log)?;
+    log.done(&format!("Installed {} in {}", package, project.tau_dir.display()));
     Ok(())
 }
 

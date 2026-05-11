@@ -8,11 +8,22 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
-use crate::cli::Cli;
-
 mod platform;
 
 pub use platform::{ArtifactPolicy, Platform};
+
+/// Caller-supplied overrides that win over `tau.conf.json` and defaults.
+/// This is the small struct `resolve()` actually needs — much smaller than
+/// the full `Cli` it used to take, and free of any CLI coupling.
+#[derive(Debug, Default, Clone)]
+pub struct Overrides {
+    pub name: Option<String>,
+    pub identifier: Option<String>,
+    pub output: Option<PathBuf>,
+    pub config: Option<PathBuf>,
+    pub platforms: Vec<String>,
+    pub release: bool,
+}
 
 pub(crate) const DEFAULT_NAME: &str = "WrappedApp";
 const DEFAULT_VERSION: &str = "0.1.0";
@@ -113,11 +124,11 @@ struct BuildSection {
 /// config travels with the app it configures, so running
 /// `tau path/to/some-app/index.html` from another directory still picks
 /// up the project's own conf.
-pub fn resolve(cwd: &Path, index_dir: Option<&Path>, cli: &Cli) -> Result<Config> {
-    let file = load_file_config(cwd, index_dir, cli.config.as_deref())?;
+pub fn resolve(cwd: &Path, index_dir: Option<&Path>, overrides: &Overrides) -> Result<Config> {
+    let file = load_file_config(cwd, index_dir, overrides.config.as_deref())?;
     let build = file.build.unwrap_or_default();
 
-    let name = cli
+    let name = overrides
         .name
         .clone()
         .or(file.name)
@@ -125,21 +136,21 @@ pub fn resolve(cwd: &Path, index_dir: Option<&Path>, cli: &Cli) -> Result<Config
 
     let version = file.version.unwrap_or_else(|| DEFAULT_VERSION.to_string());
 
-    let identifier = cli
+    let identifier = overrides
         .identifier
         .clone()
         .or(file.identifier)
         .unwrap_or_else(|| default_identifier(&name));
 
-    let output = cli
+    let output = overrides
         .output
         .as_ref()
         .map(|p| p.to_string_lossy().to_string())
         .or(build.output)
         .unwrap_or_else(|| DEFAULT_OUTPUT.to_string());
 
-    let platforms = resolve_platforms(&cli.platform, build.platforms.as_deref())?;
-    let profile = if cli.release { BuildProfile::Release } else { BuildProfile::Debug };
+    let platforms = resolve_platforms(&overrides.platforms, build.platforms.as_deref())?;
+    let profile = if overrides.release { BuildProfile::Release } else { BuildProfile::Debug };
     let _ = file.signing; // parsed for forward-compat; not yet wired into builds
 
     let mut exclude = default_excludes();
@@ -214,6 +225,27 @@ fn discover_config(cwd: &Path, index_dir: Option<&Path>) -> Option<PathBuf> {
         return Some(candidate);
     }
     None
+}
+
+/// If neither overrides nor `tau.conf.json` named the app, fall back to the
+/// project directory name. Only the project-aware paths (`tau dev` /
+/// `tau build` inside a `.tau/` project) get this — the legacy wrap path
+/// has no project root and keeps the `WrappedApp` default.
+pub fn apply_project_name_fallback(
+    cfg: &mut Config,
+    project_root: &Path,
+    overrides: &Overrides,
+) {
+    if overrides.name.is_some() || cfg.name != DEFAULT_NAME {
+        return;
+    }
+    let Some(stem) = project_root.file_name().and_then(|s| s.to_str()) else {
+        return;
+    };
+    cfg.name = stem.to_string();
+    if overrides.identifier.is_none() {
+        cfg.identifier = default_identifier(&cfg.name);
+    }
 }
 
 pub(crate) fn default_identifier(name: &str) -> String {
