@@ -93,6 +93,7 @@ impl<'a> TauriCmd<'a> {
         let mut cmd = Command::new("cargo");
         cmd.current_dir(self.project_dir)
             .env("CARGO_TARGET_DIR", self.target_dir);
+        apply_webkit_unlock(&mut cmd);
         cmd
     }
 
@@ -131,10 +132,14 @@ impl<'a> TauriCmd<'a> {
 
     /// Spawn `cargo tauri dev` and return the child handle so the caller
     /// can run a filesystem watcher (or any other concurrent work)
-    /// alongside the long-lived dev process. Stdio is inherited.
+    /// alongside the long-lived dev process. Stdio is inherited. The child
+    /// is placed in its own process group so we can signal the entire tree
+    /// (cargo forks `tauri-cli` which forks the actual Tauri app process —
+    /// SIGKILL to cargo alone won't tear those down).
     pub(crate) fn spawn_dev_desktop(&self) -> Result<Child> {
         let mut cmd = self.cargo();
         cmd.args(["tauri", "dev"]);
+        new_process_group(&mut cmd);
         self.log.command("cargo tauri dev");
         cmd.spawn().with_context(|| "failed to spawn: cargo tauri dev".to_string())
     }
@@ -150,9 +155,44 @@ impl<'a> TauriCmd<'a> {
 
         let mut dev = self.cargo();
         dev.args(["tauri", sub, "dev"]);
+        new_process_group(&mut dev);
         let label = format!("cargo tauri {} dev", sub);
         self.log.command(&label);
         dev.spawn().with_context(|| format!("failed to spawn: {}", label))
+    }
+}
+
+/// On Unix, set the spawned child as the leader of a new process group.
+/// Descendants inherit the same group, so a single `killpg()` reaches them
+/// all. On Windows this is a no-op — Windows uses Job Objects for the same
+/// purpose and we don't currently wire those up (`tau dev` on Windows
+/// inherits today's "leave orphans" behavior).
+fn new_process_group(cmd: &mut Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = cmd;
+    }
+}
+
+/// WebKitGTK (Linux) caps `requestAnimationFrame` at 60Hz under accelerated
+/// compositing, regardless of monitor refresh — verified empirically on
+/// Debian 12 / WebKitGTK 2.x where a 144Hz display still ticks at 60fps in
+/// the webview. Setting `WEBKIT_DISABLE_COMPOSITING_MODE=1` lets rAF run at
+/// the display refresh. WebGL still uses the GPU (only the compositor layer
+/// drops to software), so 3D content is unaffected; DOM-heavy animations
+/// outside the canvas can lose smoothness, which we accept for a game-dev
+/// platform where the canvas is the hot path.
+///
+/// Only applies on Linux. Only sets the var if the user hasn't already set
+/// it — respecting their environment if they've opted out.
+fn apply_webkit_unlock(cmd: &mut Command) {
+    if cfg!(target_os = "linux") && std::env::var_os("WEBKIT_DISABLE_COMPOSITING_MODE").is_none() {
+        cmd.env("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
     }
 }
 

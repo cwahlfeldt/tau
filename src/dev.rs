@@ -238,11 +238,7 @@ fn spawn_and_wait_tauri_dev(
     loop {
         if shutdown.load(Ordering::SeqCst) {
             log.detail("shutdown", "Ctrl+C received, stopping…");
-            let _ = child.kill();
-            // Wait for Tauri to actually go away so cargo's build state isn't
-            // left half-written. The cargo subprocess catches SIGTERM and tears
-            // down its own children (the running webview app).
-            let _ = child.wait();
+            terminate_tree(&mut child);
             return Ok(None);
         }
         match child.try_wait() {
@@ -250,6 +246,44 @@ fn spawn_and_wait_tauri_dev(
             Ok(None) => std::thread::sleep(Duration::from_millis(100)),
             Err(e) => return Err(anyhow::Error::new(e).context("failed to poll cargo tauri dev")),
         }
+    }
+}
+
+/// Send SIGTERM to the entire process group, give it a grace period, then
+/// SIGKILL anything still alive. The child must have been spawned with
+/// `process_group(0)` — otherwise this only signals the direct child and
+/// orphaned grandchildren (node/vite, the running Tauri app) live on.
+///
+/// On Windows there's no process-group equivalent here yet, so we fall back
+/// to `child.kill()` (which has the same orphan problem; tracked separately).
+fn terminate_tree(child: &mut Child) {
+    #[cfg(unix)]
+    {
+        let pid = child.id() as i32;
+        // SAFETY: killpg with a valid pgid is safe; the kernel returns an
+        // error rather than misbehaving if the group is already gone.
+        unsafe {
+            libc::killpg(pid, libc::SIGTERM);
+        }
+        // Grace period — Vite and cargo both clean up cooperatively on
+        // SIGTERM (close ports, flush build state). 1.5s is enough for
+        // pnpm/cargo to propagate to their own children.
+        for _ in 0..15 {
+            if let Ok(Some(_)) = child.try_wait() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        // Anything still alive gets the hard signal.
+        unsafe {
+            libc::killpg(pid, libc::SIGKILL);
+        }
+        let _ = child.wait();
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = child.kill();
+        let _ = child.wait();
     }
 }
 
@@ -280,8 +314,10 @@ impl<'a> ChildGuard<'a> {
     }
     fn kill(&mut self) {
         if self.armed {
-            let _ = self.child.kill();
-            let _ = self.child.wait();
+            // Use the process-group-aware shutdown so Vite's `node`
+            // grandchild dies with the pnpm/npm wrapper — otherwise Vite
+            // lingers as an orphan owning port 1420.
+            terminate_tree(self.child);
             self.armed = false;
         }
     }

@@ -1,5 +1,5 @@
 {
-  "name": "{slug}",
+  "name": "demo",
   "private": true,
   "version": "0.1.0",
   "type": "module",
@@ -9,10 +9,7 @@
   },
   "dependencies": {
     "three": "^0.170.0",
-    "react": "^19.0.0",
-    "react-dom": "^19.0.0",
-    "@react-three/fiber": "^9",
-    "@react-three/drei": "^10",
+    "bitecs": "^0.4",
     "@tauri-apps/plugin-fs": "^2",
     "@tauri-apps/plugin-dialog": "^2",
     "@tauri-apps/plugin-notification": "^2",
@@ -20,10 +17,6 @@
   },
   "devDependencies": {
     "vite": "^5.4.0",
-    "typescript": "^5.6.0",
-    "@vitejs/plugin-react": "^4.3.0",
-    "@types/react": "^19",
-    "@types/react-dom": "^19",
-    "@types/three": "^0.170.0"
+    "typescript": "^5.6.0"
   }
 }

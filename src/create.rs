@@ -51,11 +51,45 @@ pub fn run(name: String, log: &Logger) -> Result<()> {
     let tau_dir = target.join(".tau");
     tooling::install(pm, &tau_dir, log).context("install JS dependencies in .tau/")?;
 
+    symlink_node_modules(&target, &tau_dir)
+        .context("create node_modules symlink at project root")?;
+
     log.done(&format!(
         "Created {}\n\nNext:\n    cd {}\n    tau dev",
         target.display(),
         name
     ));
+    Ok(())
+}
+
+/// Symlink `<project>/node_modules` → `.tau/node_modules` so TypeScript and
+/// editor tooling find packages (and their `@types/*` sidecars) via normal
+/// node_modules walk-up from `src/`. Vite doesn't need this — it resolves
+/// modules through explicit aliases in `.tau/vite.config.js` — but tsserver,
+/// eslint, and any IDE-level resolver does. Without it, `import { useRef }
+/// from 'react'` shows as "Cannot find module" even though the package is
+/// installed in `.tau/node_modules`.
+///
+/// `.gitignore` already excludes `.tau/node_modules/`; the symlink itself is
+/// covered because git treats it as a regular ignored file at the same path.
+fn symlink_node_modules(project_root: &Path, tau_dir: &Path) -> Result<()> {
+    let link = project_root.join("node_modules");
+    if link.exists() || link.is_symlink() {
+        return Ok(());
+    }
+    let target = tau_dir.join("node_modules");
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&target, &link)
+            .with_context(|| format!("symlink {} -> {}", link.display(), target.display()))?;
+    }
+    #[cfg(windows)]
+    {
+        // Directory symlink on Windows. Falls back to a junction-like behavior
+        // for users without symlink privileges (Developer Mode disabled).
+        std::os::windows::fs::symlink_dir(&target, &link)
+            .with_context(|| format!("symlink {} -> {}", link.display(), target.display()))?;
+    }
     Ok(())
 }
 
@@ -73,8 +107,9 @@ fn write_template_tree(target: &Path, name: &str) -> Result<()> {
         &scaffold::render(scaffold::GAME_INDEX_HTML_TMPL, &[("name", name)]),
     )?;
 
-    // game.js: static, identical for every project.
-    scaffold::write_text(&src_dir.join("game.js"), scaffold::GAME_GAME_JS)?;
+    // game.tsx: static, identical for every project. Vite handles TS/TSX
+    // natively via esbuild + @vitejs/plugin-react for the JSX transform.
+    scaffold::write_text(&src_dir.join("game.tsx"), scaffold::GAME_GAME_TSX)?;
 
     // package.json: npm-safe slug of the user's name. The `name` field has
     // strict rules (lowercase, no spaces, no `@` etc. unless scoped); using
@@ -86,6 +121,16 @@ fn write_template_tree(target: &Path, name: &str) -> Result<()> {
     )?;
 
     scaffold::write_text(&tau_dir.join("vite.config.js"), scaffold::GAME_VITE_CONFIG)?;
+
+    // TypeScript support: `tsconfig.json` lives at the project root so
+    // tsserver auto-discovers it when the user opens any file in `src/`.
+    // `paths` redirects bare imports to `.tau/node_modules/*` (TS can't
+    // walk into `.tau/` on its own since it's not a parent of `src/`).
+    // `tau.d.ts` is the ambient declaration for the `tau` virtual module
+    // emitted by the Vite plugin in vite.config.js — kept inside `.tau/`
+    // so users don't see it.
+    scaffold::write_text(&target.join("tsconfig.json"), scaffold::GAME_TSCONFIG)?;
+    scaffold::write_text(&tau_dir.join("tau.d.ts"), scaffold::GAME_TAU_DTS)?;
 
     // pnpm-workspace.yaml is what unblocks the build-script gate pnpm 10+
     // applies to esbuild (transitively pulled in by Vite). Without this,
@@ -207,20 +252,34 @@ mod tests {
         write_template_tree(&target, "Demo").unwrap();
 
         assert!(target.join("src").join("index.html").is_file());
-        assert!(target.join("src").join("game.js").is_file());
+        assert!(target.join("src").join("game.tsx").is_file());
         assert!(target.join("src").join("assets").is_dir());
         assert!(target.join(".tau").join("package.json").is_file());
         assert!(target.join(".tau").join("vite.config.js").is_file());
+        assert!(target.join("tsconfig.json").is_file());
+        assert!(target.join(".tau").join("tau.d.ts").is_file());
         assert!(target.join(".tau").join("pnpm-workspace.yaml").is_file());
         assert!(target.join(".gitignore").is_file());
         assert!(target.join("tau.conf.json").is_file());
 
         let html = std::fs::read_to_string(target.join("src").join("index.html")).unwrap();
         assert!(html.contains("<title>Demo</title>"), "title not substituted: {}", html);
+        assert!(html.contains("./game.tsx"), "index.html should reference game.tsx: {}", html);
+        assert!(html.contains("id=\"root\""), "React root mount point missing from index.html: {}", html);
 
         let pkg = std::fs::read_to_string(target.join(".tau").join("package.json")).unwrap();
         assert!(pkg.contains("\"name\": \"demo\""), "npm name not substituted: {}", pkg);
         assert!(pkg.contains("\"three\""));
+        assert!(pkg.contains("\"react\""));
+        assert!(pkg.contains("\"@react-three/fiber\""));
+        assert!(pkg.contains("\"@react-three/drei\""));
+        assert!(!pkg.contains("\"bitecs\""), "bitecs should not be in package.json after r3f pivot: {}", pkg);
+        assert!(pkg.contains("\"@tauri-apps/plugin-fs\""));
+        assert!(pkg.contains("\"@tauri-apps/plugin-dialog\""));
+        assert!(pkg.contains("\"@tauri-apps/plugin-notification\""));
+        assert!(pkg.contains("\"@tauri-apps/plugin-haptics\""));
+        assert!(pkg.contains("\"@vitejs/plugin-react\""));
+        assert!(pkg.contains("\"typescript\""));
         assert!(pkg.contains("\"vite\""));
 
         // The conf carries the project's *display* name and identifier. The

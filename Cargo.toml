@@ -19,6 +19,13 @@ tempfile = "3"
 globset = "0.4"
 ctrlc = "3"
 
+# Unix-only: SIGTERM/SIGKILL the entire process group of long-lived dev
+# subprocesses (cargo tauri dev, pnpm/npm run dev). Without it, killing the
+# direct child leaves grandchildren (node/vite, the running Tauri app)
+# orphaned, holding port 1420 and lingering after `tau dev` exits.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [profile.release]
 lto = true
 codegen-units = 1

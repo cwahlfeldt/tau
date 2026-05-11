@@ -12,7 +12,7 @@ const camera = new THREE.PerspectiveCamera(
   0.1,
   1000,
 );
-camera.position.z = 2;
+camera.position.z = 3;
 
 const cube = new THREE.Mesh(
   new THREE.BoxGeometry(),
@@ -21,8 +21,8 @@ const cube = new THREE.Mesh(
 scene.add(cube);
 
 renderer.setAnimationLoop(() => {
-  cube.rotation.x += 0.05;
-  cube.rotation.y += 0.01;
+  cube.rotation.x += 0.01;
+  cube.rotation.y += 0.02;
   renderer.render(scene, camera);
 });
 

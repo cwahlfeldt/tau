@@ -34,9 +34,11 @@ const ICON_PNG: &[u8] = include_bytes!("templates/icon.png");
 // These are the user-facing files that live in their project, not in the
 // generated Tauri scaffold.
 pub(crate) const GAME_INDEX_HTML_TMPL: &str = include_str!("templates/game/index.html.tmpl");
-pub(crate) const GAME_GAME_JS: &str = include_str!("templates/game/game.js");
+pub(crate) const GAME_GAME_TSX: &str = include_str!("templates/game/game.tsx");
 pub(crate) const GAME_PACKAGE_JSON_TMPL: &str = include_str!("templates/game/package.json.tmpl");
 pub(crate) const GAME_VITE_CONFIG: &str = include_str!("templates/game/vite.config.js");
+pub(crate) const GAME_TSCONFIG: &str = include_str!("templates/game/tsconfig.json");
+pub(crate) const GAME_TAU_DTS: &str = include_str!("templates/game/tau.d.ts");
 pub(crate) const GAME_GITIGNORE: &str = include_str!("templates/game/gitignore");
 pub(crate) const GAME_PNPM_WORKSPACE: &str = include_str!("templates/game/pnpm-workspace.yaml");
 
@@ -133,6 +135,7 @@ fn write_src_tauri(layout: &Layout, cfg: &Config, frontend: FrontendSource<'_>) 
     write_text(&layout.src_tauri_src.join("lib.rs"), LIB_TMPL)?;
     write_json(&layout.src_tauri.join("tauri.conf.json"), &tauri_conf(cfg, &frontend))?;
     write_json(&layout.capabilities.join("default.json"), &default_capability())?;
+    write_json(&layout.capabilities.join("mobile.json"), &mobile_capability())?;
     write_bytes(&layout.icons.join("icon.png"), ICON_PNG)?;
     Ok(())
 }
@@ -222,12 +225,44 @@ fn frontend_dist_value(frontend: &FrontendSource<'_>) -> String {
 }
 
 fn default_capability() -> Value {
+    // fs scope is intentionally narrow: app data dir only, not home/desktop.
+    // Haptics permissions live in a separate `mobile.json` capability scoped
+    // to android/iOS — listing them here would fail on desktop because the
+    // crate isn't linked and Tauri's permission validator hard-rejects
+    // unknown identifiers (not a soft warning).
     json!({
         "$schema": "../gen/schemas/desktop-schema.json",
         "identifier": "default",
         "description": "Default capability for the wrapped app",
         "windows": ["main"],
-        "permissions": ["core:default"]
+        "permissions": [
+            "core:default",
+            "fs:default",
+            "fs:allow-appdata-read-recursive",
+            "fs:allow-appdata-write-recursive",
+            "dialog:default",
+            "notification:default"
+        ]
+    })
+}
+
+fn mobile_capability() -> Value {
+    // Haptics has no `:default` set; the four allow-* IDs below are the
+    // complete plugin surface. `platforms` restricts this capability to
+    // android/iOS — desktop builds skip it entirely and don't see the
+    // haptics identifiers, avoiding the unknown-permission failure.
+    json!({
+        "$schema": "../gen/schemas/mobile-schema.json",
+        "identifier": "mobile",
+        "description": "Mobile-only capabilities (haptics)",
+        "windows": ["main"],
+        "platforms": ["android", "iOS"],
+        "permissions": [
+            "haptics:allow-vibrate",
+            "haptics:allow-impact-feedback",
+            "haptics:allow-notification-feedback",
+            "haptics:allow-selection-feedback"
+        ]
     })
 }
 
@@ -255,7 +290,7 @@ mod tests {
     }
 
     #[test]
-    fn default_capability_only_grants_core() {
+    fn default_capability_grants_plugin_permissions() {
         let v = default_capability();
         let perms: Vec<&str> = v["permissions"]
             .as_array()
@@ -263,7 +298,63 @@ mod tests {
             .iter()
             .map(|x| x.as_str().unwrap())
             .collect();
-        assert_eq!(perms, vec!["core:default"]);
+
+        // Core + each desktop-safe plugin's default set.
+        for expected in [
+            "core:default",
+            "fs:default",
+            "fs:allow-appdata-read-recursive",
+            "fs:allow-appdata-write-recursive",
+            "dialog:default",
+            "notification:default",
+        ] {
+            assert!(
+                perms.contains(&expected),
+                "missing permission {}: have {:?}",
+                expected,
+                perms
+            );
+        }
+
+        // Haptics permissions belong in mobile_capability(), not here —
+        // including them in the default capability fails desktop builds.
+        for p in &perms {
+            assert!(
+                !p.starts_with("haptics:"),
+                "haptics permission leaked into default capability: {}",
+                p
+            );
+            assert!(!p.contains("home"), "unexpected home-scoped permission: {}", p);
+        }
+    }
+
+    #[test]
+    fn mobile_capability_is_platform_scoped() {
+        let v = mobile_capability();
+        let platforms: Vec<&str> = v["platforms"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.as_str().unwrap())
+            .collect();
+        assert_eq!(platforms, vec!["android", "iOS"]);
+
+        let perms: Vec<&str> = v["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.as_str().unwrap())
+            .collect();
+        // Every permission must be a haptics identifier — anything else
+        // belongs in the cross-platform default capability.
+        for p in &perms {
+            assert!(
+                p.starts_with("haptics:"),
+                "non-haptics permission in mobile capability: {}",
+                p
+            );
+        }
+        assert!(perms.contains(&"haptics:allow-vibrate"));
     }
 
     #[test]

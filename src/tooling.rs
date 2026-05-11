@@ -140,13 +140,17 @@ pub fn add(pm: PackageManager, cwd: &Path, pkg: &str, log: &Logger) -> Result<()
 pub fn vite_dev(pm: PackageManager, cwd: &Path, log: &Logger) -> Result<Child> {
     let label = format!("{} run dev", pm.label());
     log.command(&label);
-    Command::new(pm.binary())
-        .arg("run")
-        .arg("dev")
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .spawn()
-        .with_context(|| format!("failed to spawn `{}`", pm.label()))
+    let mut cmd = Command::new(pm.binary());
+    cmd.arg("run").arg("dev").current_dir(cwd).stdin(Stdio::null());
+    // Put the package manager into its own process group so we can later
+    // signal the whole tree (pnpm/npm fork node, which forks vite — killing
+    // just the pnpm pid would leave the node grandchild owning port 1420).
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    cmd.spawn().with_context(|| format!("failed to spawn `{}`", pm.label()))
 }
 
 /// Run `<pm> run build` inside `cwd`. Streams stdio through.

@@ -158,26 +158,55 @@ The shared `copy_matching` helper takes a `dest_for` closure to express the per-
 
 `withGlobalTauri = true` in the generated `tauri.conf.json` makes core Tauri APIs (`invoke`, `event`, `path`, `window`, `webview`, …) available at `window.__TAURI__.<ns>` to plain `<script>`-loaded code, no bundler required. Tauri injects these as a webview init script.
 
-Plugins (`fs`, `dialog`, `haptics`, etc.) are **not** registered by default. Users who want them should scaffold their own Tauri project — tau is for the static-site case where you want the platform shell and nothing else.
+**Plugins registered by default** (shared between the game and wrap paths, since both use the same `lib.rs.tmpl`):
+
+- `tauri-plugin-fs`, `tauri-plugin-dialog`, `tauri-plugin-notification` on all platforms.
+- `tauri-plugin-haptics` on mobile only — Cargo dep is `[target.cfg(any(target_os = "android", target_os = "ios"))]` and the Rust `.plugin(...)` call is `#[cfg(mobile)]`-gated.
+
+Capabilities are split across two files written by `write_src_tauri` ([src/scaffold/mod.rs](src/scaffold/mod.rs)):
+
+- `capabilities/default.json` (`default_capability()`): cross-platform — `core:default`, `fs:default`, `fs:allow-appdata-read-recursive`, `fs:allow-appdata-write-recursive`, `dialog:default`, `notification:default`. fs is scoped to the app data dir only, not home or arbitrary paths.
+- `capabilities/mobile.json` (`mobile_capability()`): `platforms: ["android", "iOS"]` and the four `haptics:allow-*` permissions.
+
+The split is **required**, not aesthetic. Listing `haptics:*` in the cross-platform capability fails desktop builds with `Permission haptics:allow-vibrate not found` — Tauri's permission validator rejects unknown identifiers as a hard error, not a warning, and `tauri-plugin-haptics` is target-gated to mobile in `Cargo.toml.tmpl`. The `platforms` field on the mobile capability is the only mechanism to scope permissions per-target.
+
+The wrap-path bundle ships ~5MB larger than a stripped Tauri shell as a result of the always-on plugins. If a plugin-free wrap variant is ever wanted, split `lib.rs.tmpl` into wrap and game variants and branch in `write_src_tauri`.
 
 ### Game project on-disk shape (after `tau create my-game`)
 
 ```
 my-game/
 ├── src/
-│   ├── index.html       # minimal HTML, loads ./game.js as a module
-│   ├── game.js          # spinning-cube starter
+│   ├── index.html       # <div id="root">, loads ./game.tsx
+│   ├── game.tsx         # <Canvas> + useFrame rotating mesh + HUD starter
 │   └── assets/          # empty; user drops models/textures here
 ├── tau.conf.json        # minimal: name + identifier (pinned in source control)
+├── tsconfig.json        # at project root so tsserver auto-discovers it
+│                        # from src/; `paths` redirects bare imports to .tau/node_modules
 ├── .gitignore           # ignores .tau/node_modules/, .tau/dist/, build/
 └── .tau/                # hidden plumbing; never edited by the user
-    ├── package.json
-    ├── vite.config.js
+    ├── package.json     # three, react, @react-three/fiber, drei, @tauri-apps/plugin-*, vite, typescript
+    ├── vite.config.js   # @vitejs/plugin-react + alias resolution + `tau` virtual-module plugin
+    ├── tau.d.ts         # ambient types for `import ... from 'tau'`
     ├── pnpm-workspace.yaml
     └── node_modules/    # populated by `<pm> install`
 ```
 
 `pnpm-workspace.yaml` exists to opt out of pnpm 10+'s build-script gate for esbuild (transitively pulled in by Vite). Without it, every install/run exits non-zero. npm ignores the file, so it's safe to write unconditionally.
+
+### The `tau` virtual Vite module
+
+`import { Canvas, useFrame, useThree, haptics, notification, dialog, fs } from 'tau'` is resolved by a small Vite plugin defined inline in [src/scaffold/templates/game/vite.config.js](src/scaffold/templates/game/vite.config.js) (the `tauVirtualModule()` factory). Its `load` hook returns a barrel that does `export *` from `@react-three/fiber` plus four `export * as <ns> from '@tauri-apps/plugin-*'` lines. Three consequences worth knowing:
+
+- **No npm package**: `tau` isn't a real dep. Users can't `tau add tau`. The virtual module's source string is the single source of truth — to change what `tau` exports, edit `TAU_SOURCE` in `vite.config.js` and the matching `declare module 'tau'` block in `.tau/tau.d.ts`.
+- **Plays nicely with the existing alias loop**: the bare imports inside `TAU_SOURCE` (`@react-three/fiber`, `@tauri-apps/plugin-fs`, etc.) resolve via the same alias-from-`package.json` loop that resolves `three`, `react`, `drei`. No special-casing.
+- **`export *` from r3f means r3f's public surface grows with the library**: future r3f additions are automatically available through `tau`. Trade-off: any new top-level symbol r3f adds with the same name as one of our `as <ns>` exports would collide silently. The four Tauri plugin namespaces (`haptics`, `notification`, `dialog`, `fs`) don't currently match any r3f export; check if adding more.
+
+What's **not** in `tau`:
+
+- **three.js** — users `import * as THREE from 'three'` directly when they need raw three.js types (`Mesh`, `Vector3`, materials) or utility classes. r3f provides JSX intrinsics (`<mesh>`, `<boxGeometry>`) and references the three.js types through its own typings.
+- **`@react-three/drei`** — its surface is large, opinionated, and evolves quickly. Users `import { OrbitControls, Stats, useGLTF } from '@react-three/drei'` directly. drei is pinned in `package.json` so it's pre-installed.
+- **React** — `import { useRef, useState } from 'react'` directly. R3F components and hooks come through `tau`; React primitives don't.
 
 ## Configuration file
 
