@@ -24,6 +24,12 @@ pub fn dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
+/// Public accessor for the OS-level cache root (parent of `tau/`).
+/// Other tau-owned cache subdirectories (e.g. keystores) live alongside `target/`.
+pub fn base() -> Result<PathBuf> {
+    base_cache_dir()
+}
+
 /// Resolve the OS-appropriate cache root (the parent of our `tau/target`).
 fn base_cache_dir() -> Result<PathBuf> {
     if let Some(xdg) = std::env::var_os("XDG_CACHE_HOME") {

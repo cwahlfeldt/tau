@@ -45,6 +45,10 @@ pub struct Config {
     /// the app. `default_excludes()` covers the most common footguns;
     /// users add to it via `tau.conf.json`.
     pub exclude: Vec<String>,
+    /// Optional signing material from `tau.conf.json`. When `None`, Android
+    /// release builds fall back to an auto-generated debug keystore so the
+    /// APK is at least installable on physical devices.
+    pub signing: Option<SigningConfig>,
 }
 
 /// Patterns always excluded from the materialized frontend tree, regardless
@@ -86,13 +90,17 @@ impl BuildProfile {
 
 #[derive(Debug, Deserialize, Clone, Default)]
 #[serde(deny_unknown_fields)]
-#[allow(dead_code)]
 pub struct SigningConfig {
     pub android_keystore: Option<PathBuf>,
     pub android_keystore_password: Option<String>,
     pub android_key_alias: Option<String>,
     pub android_key_password: Option<String>,
+    // Apple signing is parsed for forward-compat but not yet wired into the
+    // iOS build. `cargo tauri ios build` currently uses Xcode's default
+    // signing resolution (free provisioning profile, etc.).
+    #[allow(dead_code)]
     pub apple_signing_identity: Option<String>,
+    #[allow(dead_code)]
     pub apple_team_id: Option<String>,
 }
 
@@ -151,7 +159,7 @@ pub fn resolve(cwd: &Path, index_dir: Option<&Path>, overrides: &Overrides) -> R
 
     let platforms = resolve_platforms(&overrides.platforms, build.platforms.as_deref())?;
     let profile = if overrides.release { BuildProfile::Release } else { BuildProfile::Debug };
-    let _ = file.signing; // parsed for forward-compat; not yet wired into builds
+    let signing = file.signing;
 
     let mut exclude = default_excludes();
     // The user's output dir is one of the most common things to accidentally
@@ -176,6 +184,7 @@ pub fn resolve(cwd: &Path, index_dir: Option<&Path>, overrides: &Overrides) -> R
         platforms,
         profile,
         exclude,
+        signing,
     })
 }
 

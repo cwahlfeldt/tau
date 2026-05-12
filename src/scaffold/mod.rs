@@ -280,6 +280,7 @@ mod tests {
             platforms: vec![],
             profile: BuildProfile::Debug,
             exclude: vec![],
+            signing: None,
         }
     }
 

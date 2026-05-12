@@ -10,6 +10,7 @@ mod input;
 mod log;
 mod pipeline;
 mod scaffold;
+mod signing;
 mod tooling;
 
 use anyhow::{Context, Result};

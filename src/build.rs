@@ -14,6 +14,7 @@ use walkdir::WalkDir;
 use crate::cache;
 use crate::config::{ArtifactPolicy, Config, Platform};
 use crate::log::Logger;
+use crate::signing;
 
 /// Ensure rustup targets needed for `platform` are installed.
 pub fn ensure_targets(platform: Platform, log: &Logger) -> Result<()> {
@@ -77,6 +78,7 @@ pub fn build_platform(
     }
 }
 
+
 /// Builder for `cargo tauri ...` invocations rooted in the scaffold tempdir.
 pub(crate) struct TauriCmd<'a> {
     project_dir: &'a Path,
@@ -121,6 +123,17 @@ impl<'a> TauriCmd<'a> {
         let mut init = self.cargo();
         init.args(["tauri", sub, "init"]);
         self.run(init, &format!("cargo tauri {} init", sub))?;
+
+        // Android release APKs are unsigned by default — `adb install` rejects
+        // them with INSTALL_PARSE_FAILED_NO_CERTIFICATES. Inject a signing
+        // config (user-provided or auto-debug) before the build runs.
+        if matches!(flavor, MobileFlavor::Android) && cfg.profile.is_release() {
+            let keystore = signing::resolve_android_keystore(cfg.signing.as_ref(), self.log)?;
+            let gen_android = flavor.gen_dir(self.project_dir);
+            signing::inject_signing(&gen_android, &keystore)
+                .context("failed to inject Android signing config")?;
+            self.log.detail("signing keystore", &keystore.path.display().to_string());
+        }
 
         let mut build = self.cargo();
         build.args(["tauri", sub, "build"]);
