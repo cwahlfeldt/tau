@@ -4,9 +4,8 @@ use std::path::PathBuf;
 use crate::log::Level;
 
 /// Top-level CLI. The default (subcommand-less) invocation wraps an
-/// `index.html` (or remote URL) — this preserves the original
-/// `tau <index>` form. Subcommands are reserved for adjacent operations
-/// (e.g. `cache`, `create`, `dev`, `build`, `add`).
+/// `index.html`, a directory containing one, or a remote URL. Subcommands
+/// cover the adjacent operations: `dev`, `build`, `init`, `cache`.
 #[derive(Parser, Debug)]
 #[command(
     name = "tau",
@@ -16,8 +15,8 @@ use crate::log::Level;
     args_conflicts_with_subcommands = true
 )]
 pub struct Cli {
-    /// Path to a local index.html, or an http(s) URL to wrap directly
-    /// (required when not using a subcommand)
+    /// Path to a local index.html (or a directory containing one), or an
+    /// http(s) URL to wrap directly (required when not using a subcommand)
     pub index: Option<PathBuf>,
 
     #[command(flatten)]
@@ -97,17 +96,11 @@ pub enum Command {
         #[command(subcommand)]
         action: CacheAction,
     },
-    /// Scaffold a new tau game project (three.js + Vite, ready to dev).
-    Create {
-        /// Project name. Becomes the directory name and the default app name.
-        name: String,
-    },
-    /// Run a tau project in dev mode (Vite + Tauri webview), or wrap a
-    /// specific index.html / URL the legacy way if one is provided.
+    /// Run a wrapped app in dev mode against a local index.html, a directory
+    /// containing one, or a remote URL.
     Dev {
-        /// Optional path to a local index.html, or an http(s) URL. Omit to
-        /// auto-detect a tau project from the current directory.
-        index: Option<PathBuf>,
+        /// Path to a local index.html, a directory containing one, or an http(s) URL.
+        index: PathBuf,
 
         /// Single target platform: macos, windows, linux, android, ios. Defaults to host.
         #[arg(short, long)]
@@ -129,19 +122,35 @@ pub enum Command {
         #[arg(long)]
         keep_scaffold: bool,
     },
-    /// Build a tau project for distribution (Vite production build + Tauri bundle).
+    /// Build a wrapped app for distribution. Mirrors the top-level `tau <index>` form.
     Build {
+        /// Path to a local index.html, a directory containing one, or an http(s) URL.
+        index: PathBuf,
+
         #[command(flatten)]
         build: BuildFlags,
 
         /// Comma-separated list of target platforms: macos, windows, linux, android, ios
         #[arg(short, long, value_delimiter = ',')]
         platform: Vec<String>,
+
+        /// Generate the scaffold and print its path, but do not run the build.
+        #[arg(long)]
+        dry_run: bool,
     },
-    /// Add a JavaScript dependency to the current tau project.
-    Add {
-        /// Package name (passed through to pnpm/npm). Examples: `cannon-es`, `three@0.169.0`.
-        package: String,
+    /// Write a starter tau.conf.json into the current directory.
+    Init {
+        /// Override the app name (defaults to the current directory name).
+        #[arg(long)]
+        name: Option<String>,
+
+        /// Override the bundle identifier (defaults to com.tau.<slug>).
+        #[arg(long)]
+        identifier: Option<String>,
+
+        /// Overwrite an existing tau.conf.json if present.
+        #[arg(long)]
+        force: bool,
     },
 }
 

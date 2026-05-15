@@ -1,12 +1,9 @@
 # tau
 
-An opinionated game-dev platform built on Tauri + Vite + React Three Fiber.
-Run `tau create my-game` and you have a working spinning cube with HMR,
-TypeScript, React Fast Refresh, and the core Tauri plugins (fs, dialog,
-notification, haptics) already wired in.
-
-`tau` also retains its original mode: wrap any static web app — or a remote
-URL — into a desktop or mobile bundle by pointing at its `index.html`.
+A lightweight, single-binary CLI that wraps any web project — a single
+`index.html`, a pre-built React/Vite `dist/`, a Svelte build, or a remote
+URL — into a desktop or mobile app. Powered by Tauri v2, with no
+configuration required until you want it.
 
 ## Install
 
@@ -18,118 +15,101 @@ You'll also need:
 
 - `cargo` and the `tauri` cargo subcommand (`cargo install tauri-cli`)
 - `rustup` (mobile rustup targets are installed on demand)
-- Node 18+ and a JS package manager (pnpm preferred, npm fallback) — only
-  for the game-project workflow
 - For Android: Android SDK + NDK with `ANDROID_HOME` set
 - For iOS: Xcode
 
-## Game projects
+## Quickstart
 
 ```bash
-# Scaffold a new game
-tau create my-game
-cd my-game
+# Point at a directory containing index.html (e.g. a Vite/React/Svelte build)
+tau ./dist
 
-# Dev loop — Vite + Tauri webview, HMR over WebSocket
-tau dev
+# Or a single index.html
+tau ./examples/sample-app/index.html
 
-# Add a dependency (runs inside .tau/ via the detected package manager)
-tau add cannon-es
+# Or a remote URL
+tau https://example.com
 
-# Build for the host platform
-tau build
+# Pin a name + bundle identifier without touching the CLI flags every time
+tau init
+# (creates tau.conf.json in the current directory)
+
+# Iterate with a dev loop — Tauri webview pointed at your source tree
+tau dev ./dist
+
+# Explicit build subcommand (identical to the top-level form)
+tau build ./dist -p macos,windows,linux
 
 # Mobile
-tau build -p android
-tau build -p ios
+tau build ./dist -p android
+tau build ./dist -p ios
+
+# Inspect the generated Tauri scaffold without building
+tau ./dist --dry-run
 ```
 
-### What's in a fresh project
+Output binaries land in `./build/` by default.
 
+## Tauri APIs available out of the box
+
+Every wrapped app gets `withGlobalTauri: true` and a default set of
+plugins pre-registered. Your code can call them directly via
+`window.__TAURI__.<namespace>` from plain `<script>` tags — no bundler,
+no `@tauri-apps/*` imports needed.
+
+| Plugin | Where | Capability |
+| --- | --- | --- |
+| **fs** | desktop + mobile | `fs:default` plus appdata read/write recursive. Scoped to the app data dir only — no home or desktop access. |
+| **dialog** | desktop + mobile | File open/save and message boxes. |
+| **notification** | desktop + mobile | Local notifications. |
+| **haptics** | mobile only | Cargo target-gated + `#[cfg(mobile)]`. Vibrate, impact/notification/selection feedback. |
+
+Plus all Tauri core APIs (`invoke`, `event`, `path`, `window`, `webview`, …).
+This adds ~5MB to the bundle compared to a stripped Tauri shell.
+
+URL wraps point the webview at the remote URL and skip Tauri's JS API
+injection (no `window.__TAURI__`). Use a local file or directory if you
+need the plugin bridges.
+
+## Configuration
+
+Everything works without it. When you do want to pin things, run
+`tau init` to drop a starter `tau.conf.json` in the current directory,
+or hand-write one next to your `index.html`:
+
+```json
+{
+  "name": "My App",
+  "version": "0.1.0",
+  "identifier": "com.example.myapp",
+  "exclude": ["secrets/**"],
+  "permissions": [
+    "fs:allow-audio-write-recursive",
+    "fs:allow-document-read-recursive"
+  ],
+  "build": {
+    "output": "./dist",
+    "platforms": ["macos", "android"]
+  }
+}
 ```
-my-game/
-├── src/
-│   ├── index.html       # <div id="root"> + loads ./game.tsx
-│   ├── game.tsx         # <Canvas> with a rotating <mesh> + HUD overlay
-│   └── assets/          # drop models/textures here
-├── tau.conf.json        # name + identifier (pinned in source control)
-├── tsconfig.json        # editors auto-discover this from src/
-├── .gitignore
-└── .tau/                # hidden plumbing; tau owns this
-    ├── package.json     # three, react, @react-three/fiber, drei, @tauri-apps/plugin-*, vite, typescript
-    ├── vite.config.js   # @vitejs/plugin-react + alias resolution + the `tau` virtual-module plugin
-    ├── tau.d.ts         # ambient types for `import ... from 'tau'`
-    ├── pnpm-workspace.yaml
-    └── node_modules/
-```
 
-### Imports
+Resolution order: CLI flags > `tau.conf.json` > defaults. Unknown fields
+are rejected.
 
-- `import { Canvas, useFrame, useThree, haptics, notification, dialog, fs } from 'tau'` —
-  the `tau` virtual module re-exports all of `@react-three/fiber` plus the
-  four Tauri plugin namespaces. One import for the scene-graph hooks and
-  the platform APIs. Types live in `.tau/tau.d.ts` (auto-discovered by
-  your editor via the root `tsconfig.json`).
-- `import * as THREE from 'three'` — raw three.js types and utilities
-  (`THREE.Vector3`, `THREE.Mesh`, materials, geometries) when r3f's
-  intrinsics aren't enough.
-- `import { OrbitControls, Stats, useGLTF } from '@react-three/drei'` —
-  drei's helper components and hooks. Pinned in `.tau/package.json` but
-  not re-exported through `tau` (drei's surface is too big and evolves
-  fast).
-- React itself: `import { useRef, useState, useEffect } from 'react'`.
+`permissions` appends Tauri capability identifiers to the default
+cross-platform capability — useful when you need fs access outside the
+app data dir, or want to grant additional plugin permissions without
+forking the scaffold. The defaults (`core:default`, `fs:default`,
+`fs:allow-appdata-{read,write}-recursive`, `dialog:default`,
+`notification:default`) are always included.
 
-### Plugins registered by default
-
-- **fs** — scoped to the app data dir only (`fs:default` plus the
-  appdata read/write recursive permissions). No home/desktop access.
-- **dialog** — file open/save and message boxes.
-- **notification** — local notifications.
-- **haptics** — mobile only (Cargo target-gated + `#[cfg(mobile)]`).
-
-If you want to widen the fs scope, change other capability settings, or
-drop a plugin, edit the generated `src-tauri/capabilities/default.json`
-once the tempdir is materialized — or run `--keep-scaffold` and copy the
-edited config into a fork.
-
-## Wrap a static site or URL
+`tau init` flags:
 
 ```bash
-# Local file: host platform, debug profile, output in ./build/
-tau examples/sample-app/index.html
-
-# Remote URL
-tau https://example.com --name "Example" --identifier com.example.app
-
-# Multiple desktop targets
-tau examples/sample-app/index.html -p macos,windows,linux
-
-# Mobile
-tau examples/sample-app/index.html -p android
-
-# Override identity from the CLI
-tau examples/sample-app/index.html --name "My App" --identifier com.example.myapp
-
-# Inspect the generated scaffold without building
-tau examples/sample-app/index.html --dry-run
+tau init --name "My App" --identifier com.example.myapp
+tau init --force                # overwrite an existing tau.conf.json
 ```
-
-Wrap output shares the same Tauri scaffold as game projects, so the four
-plugins listed above are linked in there too. Binary size grows ~5MB
-compared to a stripped Tauri shell.
-
-URL wraps skip asset discovery — the wrapped webview just navigates to
-the URL. No Tauri JS APIs are injected (no `window.__TAURI__`). Use a
-local file if you need plugin bridges or offline asset bundling.
-
-### Hot-reload dev loop (wrap path)
-
-```bash
-tau dev examples/sample-app/index.html
-```
-
-Edits to HTML / CSS / JS are picked up automatically. No Vite — Tauri
-serves files directly from your source dir.
 
 ## Cache management
 
@@ -148,31 +128,22 @@ The cache lives at:
 - macOS: `~/Library/Caches/tau/target`
 - Linux: `$XDG_CACHE_HOME/tau/target`
 
-## Configuration
+## Examples
 
-Optional `tau.conf.json` next to your `index.html` (or in the cwd, or
-`--config <path>`):
+The `examples/` directory contains a few inputs to try:
 
-```json
-{
-  "name": "My App",
-  "version": "0.1.0",
-  "identifier": "com.example.myapp",
-  "include": ["assets/**", "fonts/*.woff2"],
-  "build": {
-    "output": "./dist",
-    "platforms": ["macos", "android"]
-  }
-}
-```
-
-CLI flags always win over file values. Unknown fields are rejected.
+- `examples/sample-app/` — hello world: HTML, CSS, an image, a script.
+- `examples/configured-app/` — same shape, plus a `tau.conf.json`.
+- `examples/haptics-demo/` — exercises the mobile haptics plugin.
+- `examples/r3f-demo/` — React Three Fiber app with notification, dialog,
+  and fs plugin demos. Source in `src/`, committed Vite build in `dist/`.
+- `examples/blade-dash/` — a non-trivial pre-built site you can wrap.
 
 ## Development
 
 ```bash
-cargo build              # CLI
-cargo test               # unit tests
+cargo build
+cargo test
 cargo clippy --all-targets
 ```
 

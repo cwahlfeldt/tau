@@ -1,42 +1,26 @@
 //! `tau dev` — fast iteration via `cargo tauri dev`.
 //!
-//! Two modes:
-//!
-//! - **Project mode** (no positional `index`, `discover_project` succeeds):
-//!   spawn Vite in `.tau/`, wait for it to come up on 127.0.0.1:1420, then
-//!   scaffold a Tauri project whose `devUrl` points at Vite. Tauri loads the
-//!   webview from there during dev — Vite handles HMR, asset serving,
-//!   bare-import resolution.
-//!
-//! - **Legacy mode** (positional `index` provided, or no project found):
-//!   today's behavior — scaffold pointing `frontendDist` at the user's source
-//!   tree, spawn `cargo tauri dev`. No Vite. No HMR (just reload the webview).
+//! Scaffolds a temp Tauri project pointing `frontendDist` at the user's
+//! source tree (or a stub for URL inputs) and spawns the dev process.
+//! Ctrl+C kills the whole process tree so nothing is left orphaned.
 
-use anyhow::{anyhow, bail, Context, Result};
-use std::net::TcpStream;
+use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::build::{ensure_targets, MobileFlavor, TauriCmd};
 use crate::cache;
 use crate::config::{self, Overrides, Platform};
-use crate::input::{self, Input, ProjectRoot};
+use crate::input::Input;
 use crate::log::Logger;
 use crate::scaffold;
-use crate::tooling;
-
-/// Vite's bind. Hard-coded to match the template `vite.config.js`. If we ever
-/// make the port configurable, both ends need to move together.
-const DEV_HOST: &str = "127.0.0.1";
-const DEV_PORT: u16 = 1420;
-const DEV_URL: &str = "http://127.0.0.1:1420";
 
 pub struct DevArgs {
-    pub index: Option<PathBuf>,
+    pub index: PathBuf,
     pub platform: Option<String>,
     pub name: Option<String>,
     pub identifier: Option<String>,
@@ -60,80 +44,11 @@ impl DevArgs {
 
 pub fn run(args: DevArgs) -> Result<()> {
     let platform = resolve_platform(args.platform.as_deref())?;
-
-    // Explicit positional argument always wins — if the user passes
-    // `tau dev path/to/index.html`, never try to discover.
-    if let Some(index_path) = &args.index {
-        return run_legacy(&args, index_path.clone(), platform);
-    }
-    let cwd = std::env::current_dir()?;
-    if let Some(project) = input::discover_project(&cwd) {
-        return run_project(&args, project, platform);
-    }
-    Err(anyhow!(
-        "no tau project found in `{}` or any parent, and no index path was provided.\n\
-         Run `tau create <name>` to scaffold one, or pass `tau dev <path/to/index.html>` to wrap an existing file.",
-        cwd.display()
-    ))
-}
-
-/// Project mode: Vite + Tauri devUrl.
-fn run_project(args: &DevArgs, project: ProjectRoot, platform: Platform) -> Result<()> {
     let log = &args.log;
-    log.heading("tau dev");
-    log.detail("project", &project.root.display().to_string());
-
-    tooling::ensure_node_present()?;
-    let pm = tooling::detect_package_manager()?;
-    log.detail("package manager", pm.label());
-
-    if !project.tau_dir.join("node_modules").is_dir() {
-        log.detail("install", "node_modules missing — installing first");
-        tooling::install(pm, &project.tau_dir, log)?;
-    }
-
-    // Resolve config relative to the project root, not cwd. This means
-    // `tau dev` in a subdirectory still finds tau.conf.json at the root.
-    let overrides = args.overrides(platform);
-    let mut cfg = config::resolve(&project.root, Some(&project.root), &overrides)?;
-    config::apply_project_name_fallback(&mut cfg, &project.root, &overrides);
-    cfg.platforms = vec![platform];
-
-    log_header(log, &cfg, platform);
-
-    let workdir = make_workdir("tau-dev-")?;
-    let scaffold_dir = workdir.path().to_path_buf();
-    scaffold::create_for_dev_server(&scaffold_dir, &cfg, DEV_URL)?;
-    log.detail("scaffold", &scaffold_dir.display().to_string());
-
-    ensure_targets(platform, log)?;
-    let target_dir = cache::dir()?;
-
-    let shutdown = install_shutdown_flag();
-
-    // Spawn Vite first; Tauri only points the webview at it once it's up.
-    log.heading("Starting Vite dev server");
-    let mut vite_child = tooling::vite_dev(pm, &project.tau_dir, log)?;
-    let mut vite_guard = ChildGuard::new(&mut vite_child);
-
-    wait_for_dev_server(DEV_HOST, DEV_PORT, Duration::from_secs(15))
-        .context("Vite dev server didn't come up")?;
-    log.detail("vite", &format!("ready at {}", DEV_URL));
-
-    let status = spawn_and_wait_tauri_dev(&scaffold_dir, &target_dir, platform, &shutdown, log)?;
-
-    // Kill Vite explicitly — without this it lingers as a background process
-    // owning port 1420, which silently breaks the next dev session.
-    vite_guard.kill();
-
-    finalize(workdir, args.keep_scaffold, log);
-    check_status(status)
-}
-
-/// Legacy mode: today's behavior (no Vite).
-fn run_legacy(args: &DevArgs, index: PathBuf, platform: Platform) -> Result<()> {
-    let log = &args.log;
-    let raw = index.to_str().context("index argument is not valid UTF-8")?;
+    let raw = args
+        .index
+        .to_str()
+        .context("index argument is not valid UTF-8")?;
     let input = Input::parse(raw)?;
 
     let overrides = args.overrides(platform);
@@ -201,9 +116,9 @@ fn check_status(status: Option<std::process::ExitStatus>) -> Result<()> {
 }
 
 /// Install a SIGINT handler that flips an atomic flag. Without it, the
-/// default Rust behavior is to die on the first Ctrl+C, leaving Vite/Tauri
-/// orphaned (still owning port 1420 and the webview). The flag lets the
-/// poll loop observe Ctrl+C and orchestrate a coordinated kill.
+/// default Rust behavior is to die on the first Ctrl+C, leaving the Tauri
+/// dev process orphaned. The flag lets the poll loop observe Ctrl+C and
+/// orchestrate a coordinated kill of the whole process tree.
 /// `ctrlc::set_handler` returns Err if a handler is already installed —
 /// that's fine, dev mode is one-per-process.
 fn install_shutdown_flag() -> Arc<AtomicBool> {
@@ -252,7 +167,7 @@ fn spawn_and_wait_tauri_dev(
 /// Send SIGTERM to the entire process group, give it a grace period, then
 /// SIGKILL anything still alive. The child must have been spawned with
 /// `process_group(0)` — otherwise this only signals the direct child and
-/// orphaned grandchildren (node/vite, the running Tauri app) live on.
+/// orphaned grandchildren live on.
 ///
 /// On Windows there's no process-group equivalent here yet, so we fall back
 /// to `child.kill()` (which has the same orphan problem; tracked separately).
@@ -265,9 +180,9 @@ fn terminate_tree(child: &mut Child) {
         unsafe {
             libc::killpg(pid, libc::SIGTERM);
         }
-        // Grace period — Vite and cargo both clean up cooperatively on
-        // SIGTERM (close ports, flush build state). 1.5s is enough for
-        // pnpm/cargo to propagate to their own children.
+        // Grace period — cargo cleans up cooperatively on SIGTERM
+        // (closes ports, flushes build state). 1.5s is enough for the
+        // signal to propagate to children.
         for _ in 0..15 {
             if let Ok(Some(_)) = child.try_wait() {
                 return;
@@ -284,48 +199,6 @@ fn terminate_tree(child: &mut Child) {
     {
         let _ = child.kill();
         let _ = child.wait();
-    }
-}
-
-/// Poll a TCP port until it accepts connections, or `timeout` elapses.
-fn wait_for_dev_server(host: &str, port: u16, timeout: Duration) -> Result<()> {
-    let deadline = Instant::now() + timeout;
-    let addr = format!("{}:{}", host, port);
-    while Instant::now() < deadline {
-        if TcpStream::connect_timeout(&addr.parse().unwrap(), Duration::from_millis(500)).is_ok() {
-            return Ok(());
-        }
-        std::thread::sleep(Duration::from_millis(150));
-    }
-    bail!("timed out waiting for dev server at {}", addr)
-}
-
-/// Make sure a child process is killed if we exit early. The actual `wait`
-/// call still happens via the caller — this guard only fires if a `?` causes
-/// the function to return without calling `kill()` explicitly.
-struct ChildGuard<'a> {
-    child: &'a mut Child,
-    armed: bool,
-}
-
-impl<'a> ChildGuard<'a> {
-    fn new(child: &'a mut Child) -> Self {
-        Self { child, armed: true }
-    }
-    fn kill(&mut self) {
-        if self.armed {
-            // Use the process-group-aware shutdown so Vite's `node`
-            // grandchild dies with the pnpm/npm wrapper — otherwise Vite
-            // lingers as an orphan owning port 1420.
-            terminate_tree(self.child);
-            self.armed = false;
-        }
-    }
-}
-
-impl Drop for ChildGuard<'_> {
-    fn drop(&mut self) {
-        self.kill();
     }
 }
 
@@ -359,7 +232,7 @@ mod tests {
 
     fn empty_args() -> DevArgs {
         DevArgs {
-            index: Some(PathBuf::from("index.html")),
+            index: PathBuf::from("index.html"),
             platform: None,
             name: None,
             identifier: None,

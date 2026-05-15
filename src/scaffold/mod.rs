@@ -30,18 +30,6 @@ const LIB_TMPL: &str = include_str!("templates/lib.rs.tmpl");
 const BUILD_TMPL: &str = include_str!("templates/build.rs.tmpl");
 const ICON_PNG: &[u8] = include_bytes!("templates/icon.png");
 
-// Game project templates — used by `tau create` to scaffold a new game.
-// These are the user-facing files that live in their project, not in the
-// generated Tauri scaffold.
-pub(crate) const GAME_INDEX_HTML_TMPL: &str = include_str!("templates/game/index.html.tmpl");
-pub(crate) const GAME_GAME_TSX: &str = include_str!("templates/game/game.tsx");
-pub(crate) const GAME_PACKAGE_JSON_TMPL: &str = include_str!("templates/game/package.json.tmpl");
-pub(crate) const GAME_VITE_CONFIG: &str = include_str!("templates/game/vite.config.js");
-pub(crate) const GAME_TSCONFIG: &str = include_str!("templates/game/tsconfig.json");
-pub(crate) const GAME_TAU_DTS: &str = include_str!("templates/game/tau.d.ts");
-pub(crate) const GAME_GITIGNORE: &str = include_str!("templates/game/gitignore");
-pub(crate) const GAME_PNPM_WORKSPACE: &str = include_str!("templates/game/pnpm-workspace.yaml");
-
 /// All paths inside the generated scaffold, derived once from the project root.
 struct Layout {
     src_tauri: PathBuf,
@@ -99,28 +87,11 @@ pub fn create_for_url(project_dir: &Path, cfg: &Config, url: &str) -> Result<()>
     Ok(())
 }
 
-/// Scaffold a Tauri project that talks to a local dev server (Vite) during
-/// `tauri dev`. `frontendDist` still has to exist at scaffold time — we point
-/// it at the same stub the URL flow uses — but `devUrl` is what Tauri actually
-/// loads in the webview when running `cargo tauri dev`.
-pub fn create_for_dev_server(project_dir: &Path, cfg: &Config, dev_url: &str) -> Result<()> {
-    let layout = Layout::new(project_dir);
-    layout.ensure_dirs()?;
-
-    let stub_dir = project_dir.join("dist");
-    std::fs::create_dir_all(&stub_dir).with_context(|| format!("create dir {}", stub_dir.display()))?;
-    write_bytes(&stub_dir.join("index.html"), URL_STUB_HTML.as_bytes())?;
-
-    write_src_tauri(&layout, cfg, FrontendSource::DevServer { url: dev_url, stub_dir: &stub_dir })?;
-    Ok(())
-}
-
 const URL_STUB_HTML: &str = "<!doctype html><meta charset=\"utf-8\"><title>tau</title>";
 
 enum FrontendSource<'a> {
     Local(&'a Path),
     Url { url: &'a str, stub_dir: &'a Path },
-    DevServer { url: &'a str, stub_dir: &'a Path },
 }
 
 fn write_src_tauri(layout: &Layout, cfg: &Config, frontend: FrontendSource<'_>) -> Result<()> {
@@ -134,7 +105,10 @@ fn write_src_tauri(layout: &Layout, cfg: &Config, frontend: FrontendSource<'_>) 
     write_text(&layout.src_tauri_src.join("main.rs"), MAIN_TMPL)?;
     write_text(&layout.src_tauri_src.join("lib.rs"), LIB_TMPL)?;
     write_json(&layout.src_tauri.join("tauri.conf.json"), &tauri_conf(cfg, &frontend))?;
-    write_json(&layout.capabilities.join("default.json"), &default_capability())?;
+    write_json(
+        &layout.capabilities.join("default.json"),
+        &default_capability(&cfg.permissions),
+    )?;
     write_json(&layout.capabilities.join("mobile.json"), &mobile_capability())?;
     write_bytes(&layout.icons.join("icon.png"), ICON_PNG)?;
     Ok(())
@@ -165,9 +139,11 @@ pub(crate) fn render(template: &str, vars: &[(&str, &str)]) -> String {
 }
 
 fn tauri_conf(cfg: &Config, frontend: &FrontendSource<'_>) -> Value {
-    // `withGlobalTauri` exposes core APIs at `window.__TAURI__.*` for plain
-    // <script>-loaded code (no bundler required). Plugins are not registered
-    // by default — users who want them can scaffold their own Tauri project.
+    // Plugins (fs, dialog, notification cross-platform; haptics on mobile)
+    // are registered by the shared `lib.rs.tmpl`; capability grants live in
+    // `capabilities/default.json` and `capabilities/mobile.json`.
+    // `withGlobalTauri` exposes both core APIs and the registered plugins at
+    // `window.__TAURI__.*` for plain <script>-loaded code (no bundler required).
     let mut window = json!({
         "label": "main",
         "title": cfg.name,
@@ -183,14 +159,7 @@ fn tauri_conf(cfg: &Config, frontend: &FrontendSource<'_>) -> Value {
     }
 
     let frontend_dist = frontend_dist_value(frontend);
-    let mut build = json!({ "frontendDist": frontend_dist });
-    // `devUrl` only applies during `cargo tauri dev` — production builds still
-    // bundle the contents of frontendDist, which for the dev-server flow is
-    // a stub. The project-aware build path runs `vite build` first and points
-    // a fresh scaffold's frontendDist at the real `dist/`.
-    if let FrontendSource::DevServer { url, .. } = frontend {
-        build["devUrl"] = Value::String((*url).to_string());
-    }
+    let build = json!({ "frontendDist": frontend_dist });
 
     json!({
         "$schema": "https://schema.tauri.app/config/2",
@@ -220,29 +189,40 @@ fn frontend_dist_value(frontend: &FrontendSource<'_>) -> String {
     match frontend {
         FrontendSource::Local(p) => p.display().to_string(),
         FrontendSource::Url { stub_dir, .. } => stub_dir.display().to_string(),
-        FrontendSource::DevServer { stub_dir, .. } => stub_dir.display().to_string(),
     }
 }
 
-fn default_capability() -> Value {
+fn default_capability(extra: &[String]) -> Value {
     // fs scope is intentionally narrow: app data dir only, not home/desktop.
     // Haptics permissions live in a separate `mobile.json` capability scoped
     // to android/iOS — listing them here would fail on desktop because the
     // crate isn't linked and Tauri's permission validator hard-rejects
     // unknown identifiers (not a soft warning).
+    //
+    // `extra` is a user-supplied list of permission identifiers (from
+    // `tau.conf.json` → `permissions`) appended to the defaults. Use this
+    // to widen fs scope (`fs:allow-audio-write-recursive`, etc.) or grant
+    // additional plugin permissions without forking the scaffold.
+    let mut permissions: Vec<Value> = vec![
+        "core:default".into(),
+        "fs:default".into(),
+        "fs:allow-appdata-read-recursive".into(),
+        "fs:allow-appdata-write-recursive".into(),
+        "dialog:default".into(),
+        "notification:default".into(),
+    ];
+    for p in extra {
+        let v: Value = p.clone().into();
+        if !permissions.contains(&v) {
+            permissions.push(v);
+        }
+    }
     json!({
         "$schema": "../gen/schemas/desktop-schema.json",
         "identifier": "default",
         "description": "Default capability for the wrapped app",
         "windows": ["main"],
-        "permissions": [
-            "core:default",
-            "fs:default",
-            "fs:allow-appdata-read-recursive",
-            "fs:allow-appdata-write-recursive",
-            "dialog:default",
-            "notification:default"
-        ]
+        "permissions": permissions,
     })
 }
 
@@ -280,6 +260,7 @@ mod tests {
             platforms: vec![],
             profile: BuildProfile::Debug,
             exclude: vec![],
+            permissions: vec![],
             signing: None,
         }
     }
@@ -292,7 +273,7 @@ mod tests {
 
     #[test]
     fn default_capability_grants_plugin_permissions() {
-        let v = default_capability();
+        let v = default_capability(&[]);
         let perms: Vec<&str> = v["permissions"]
             .as_array()
             .unwrap()
@@ -327,6 +308,44 @@ mod tests {
             );
             assert!(!p.contains("home"), "unexpected home-scoped permission: {}", p);
         }
+    }
+
+    #[test]
+    fn default_capability_appends_extra_permissions() {
+        let extras = vec![
+            "fs:allow-audio-write-recursive".to_string(),
+            "fs:allow-document-read-recursive".to_string(),
+        ];
+        let v = default_capability(&extras);
+        let perms: Vec<&str> = v["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.as_str().unwrap())
+            .collect();
+        // Defaults still present.
+        assert!(perms.contains(&"core:default"));
+        assert!(perms.contains(&"fs:allow-appdata-write-recursive"));
+        // Extras appended.
+        assert!(perms.contains(&"fs:allow-audio-write-recursive"));
+        assert!(perms.contains(&"fs:allow-document-read-recursive"));
+    }
+
+    #[test]
+    fn default_capability_dedupes_extras() {
+        let extras = vec![
+            "fs:default".to_string(),
+            "fs:allow-audio-write-recursive".to_string(),
+        ];
+        let v = default_capability(&extras);
+        let perms: Vec<&str> = v["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.as_str().unwrap())
+            .collect();
+        let fs_default_count = perms.iter().filter(|p| **p == "fs:default").count();
+        assert_eq!(fs_default_count, 1, "fs:default duplicated: {:?}", perms);
     }
 
     #[test]
@@ -379,19 +398,6 @@ mod tests {
         );
         assert_eq!(v["app"]["windows"][0]["url"], serde_json::json!("https://example.com"));
         assert_eq!(v["build"]["frontendDist"], serde_json::json!("/tmp/stub"));
-    }
-
-    #[test]
-    fn tauri_conf_sets_dev_url_for_dev_server() {
-        let v = tauri_conf(
-            &sample_cfg(),
-            &FrontendSource::DevServer { url: "http://127.0.0.1:1420", stub_dir: Path::new("/tmp/stub") },
-        );
-        assert_eq!(v["build"]["devUrl"], serde_json::json!("http://127.0.0.1:1420"));
-        assert_eq!(v["build"]["frontendDist"], serde_json::json!("/tmp/stub"));
-        // dev-server flow drives the webview via Tauri's devUrl, not a window URL —
-        // window URL is reserved for the remote-wrap (Url) flow.
-        assert!(v["app"]["windows"][0].get("url").is_none());
     }
 
     #[test]

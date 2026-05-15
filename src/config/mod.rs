@@ -45,6 +45,11 @@ pub struct Config {
     /// the app. `default_excludes()` covers the most common footguns;
     /// users add to it via `tau.conf.json`.
     pub exclude: Vec<String>,
+    /// Extra Tauri capability permission identifiers appended to the default
+    /// cross-platform capability (e.g. `"fs:allow-audio-write-recursive"`,
+    /// `"fs:scope-document"`). The defaults — core, fs+appdata, dialog,
+    /// notification — are always included; this field adds to them.
+    pub permissions: Vec<String>,
     /// Optional signing material from `tau.conf.json`. When `None`, Android
     /// release builds fall back to an auto-generated debug keystore so the
     /// APK is at least installable on physical devices.
@@ -115,6 +120,10 @@ struct FileConfig {
     /// User-supplied glob patterns (relative to source root) that are
     /// appended to `default_excludes()`.
     exclude: Option<Vec<String>>,
+    /// Extra Tauri capability permission identifiers appended to the
+    /// default capability. Each entry is a permission string like
+    /// `"fs:allow-audio-write-recursive"` or a scope identifier.
+    permissions: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -176,6 +185,8 @@ pub fn resolve(cwd: &Path, index_dir: Option<&Path>, overrides: &Overrides) -> R
         exclude.extend(user);
     }
 
+    let permissions = file.permissions.unwrap_or_default();
+
     Ok(Config {
         name,
         version,
@@ -184,6 +195,7 @@ pub fn resolve(cwd: &Path, index_dir: Option<&Path>, overrides: &Overrides) -> R
         platforms,
         profile,
         exclude,
+        permissions,
         signing,
     })
 }
@@ -220,8 +232,8 @@ fn load_file_config(
 
 /// Search order for `tau.conf.json` when `--config` isn't given:
 /// 1. Next to the input `index.html` (most specific to this app).
-/// 2. The current working directory (kept for back-compat with the
-///    "I'm already standing in the project" workflow).
+/// 2. The current working directory (handles the case where the user is
+///    already standing in the app's directory).
 fn discover_config(cwd: &Path, index_dir: Option<&Path>) -> Option<PathBuf> {
     if let Some(dir) = index_dir {
         let candidate = dir.join(DEFAULT_CONFIG_FILE);
@@ -234,27 +246,6 @@ fn discover_config(cwd: &Path, index_dir: Option<&Path>) -> Option<PathBuf> {
         return Some(candidate);
     }
     None
-}
-
-/// If neither overrides nor `tau.conf.json` named the app, fall back to the
-/// project directory name. Only the project-aware paths (`tau dev` /
-/// `tau build` inside a `.tau/` project) get this — the legacy wrap path
-/// has no project root and keeps the `WrappedApp` default.
-pub fn apply_project_name_fallback(
-    cfg: &mut Config,
-    project_root: &Path,
-    overrides: &Overrides,
-) {
-    if overrides.name.is_some() || cfg.name != DEFAULT_NAME {
-        return;
-    }
-    let Some(stem) = project_root.file_name().and_then(|s| s.to_str()) else {
-        return;
-    };
-    cfg.name = stem.to_string();
-    if overrides.identifier.is_none() {
-        cfg.identifier = default_identifier(&cfg.name);
-    }
 }
 
 pub(crate) fn default_identifier(name: &str) -> String {

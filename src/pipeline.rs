@@ -8,17 +8,40 @@
 use anyhow::{anyhow, Context, Result};
 use std::path::PathBuf;
 
-use crate::cli::Cli;
+use crate::cli::{BuildFlags, Cli};
 use crate::config::Overrides;
 use crate::filter;
 use crate::input::Input;
 use crate::log::Logger;
 use crate::{build, config, scaffold};
 
+/// Arguments for the `tau build <index>` subcommand. Mirrors what the
+/// top-level wrap form picks up from `Cli`.
+pub struct BuildArgs {
+    pub index: PathBuf,
+    pub build: BuildFlags,
+    pub platform: Vec<String>,
+    pub dry_run: bool,
+    pub log: Logger,
+}
+
 pub fn run(args: Cli) -> Result<()> {
     let log = Logger::new(args.common.level());
-    let inputs = Inputs::resolve(&args)?;
+    let raw = args
+        .index
+        .as_ref()
+        .ok_or_else(|| anyhow!("an index.html path or URL is required"))?
+        .clone();
+    let inputs = Inputs::resolve(&raw, &args.build, &args.platform)?;
+    execute(inputs, args.dry_run, args.build.keep_scaffold, log)
+}
 
+pub fn run_build(args: BuildArgs) -> Result<()> {
+    let inputs = Inputs::resolve(&args.index, &args.build, &args.platform)?;
+    execute(inputs, args.dry_run, args.build.keep_scaffold, args.log)
+}
+
+fn execute(inputs: Inputs, dry_run: bool, keep_scaffold: bool, log: Logger) -> Result<()> {
     log_header(&log, &inputs);
 
     let workdir = tempfile::Builder::new()
@@ -56,7 +79,7 @@ pub fn run(args: Cli) -> Result<()> {
     };
     log.detail("scaffold", &project_dir.display().to_string());
 
-    if args.dry_run {
+    if dry_run {
         let kept = workdir.keep();
         log.done(&format!("Dry run: scaffold preserved at {}", kept.display()));
         return Ok(());
@@ -74,7 +97,7 @@ pub fn run(args: Cli) -> Result<()> {
         }
     }
 
-    if args.build.keep_scaffold {
+    if keep_scaffold {
         let kept = workdir.keep();
         log.done(&format!("Scaffold preserved at {}", kept.display()));
     }
@@ -91,13 +114,7 @@ struct Inputs {
 }
 
 impl Inputs {
-    fn resolve(args: &Cli) -> Result<Self> {
-        // `subcommand_negates_reqs` makes `index` optional at the clap layer;
-        // when we reach this branch it must be present.
-        let raw = args
-            .index
-            .as_ref()
-            .ok_or_else(|| anyhow!("an index.html path or URL is required"))?;
+    fn resolve(raw: &std::path::Path, build_flags: &BuildFlags, platforms: &[String]) -> Result<Self> {
         let raw_str = raw
             .to_str()
             .ok_or_else(|| anyhow!("index argument is not valid UTF-8"))?;
@@ -109,12 +126,12 @@ impl Inputs {
             Input::Url(_) => None,
         };
         let overrides = Overrides {
-            name: args.build.name.clone(),
-            identifier: args.build.identifier.clone(),
-            output: args.build.output.clone(),
-            config: args.build.config.clone(),
-            platforms: args.platform.clone(),
-            release: args.build.release,
+            name: build_flags.name.clone(),
+            identifier: build_flags.identifier.clone(),
+            output: build_flags.output.clone(),
+            config: build_flags.config.clone(),
+            platforms: platforms.to_vec(),
+            release: build_flags.release,
         };
         let cfg = config::resolve(&cwd, index_dir, &overrides)?;
 

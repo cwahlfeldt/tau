@@ -197,9 +197,9 @@ fn new_process_group(cmd: &mut Command) {
 /// Debian 12 / WebKitGTK 2.x where a 144Hz display still ticks at 60fps in
 /// the webview. Setting `WEBKIT_DISABLE_COMPOSITING_MODE=1` lets rAF run at
 /// the display refresh. WebGL still uses the GPU (only the compositor layer
-/// drops to software), so 3D content is unaffected; DOM-heavy animations
-/// outside the canvas can lose smoothness, which we accept for a game-dev
-/// platform where the canvas is the hot path.
+/// drops to software), so canvas content is unaffected; DOM-heavy animations
+/// outside the canvas can lose smoothness — an acceptable tradeoff for apps
+/// where smooth canvas rendering matters.
 ///
 /// Only applies on Linux. Only sets the var if the user hasn't already set
 /// it — respecting their environment if they've opted out.

@@ -1,17 +1,15 @@
 mod build;
-mod build_project;
 mod cache;
 mod cli;
 mod config;
-mod create;
 mod dev;
 mod filter;
+mod init;
 mod input;
 mod log;
 mod pipeline;
 mod scaffold;
 mod signing;
-mod tooling;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -24,7 +22,6 @@ fn main() -> Result<()> {
     let log = Logger::new(args.common.level());
     match args.command {
         Some(Command::Cache { action }) => run_cache(&action),
-        Some(Command::Create { name }) => create::run(name, &log),
         Some(Command::Dev {
             index,
             platform,
@@ -41,12 +38,28 @@ fn main() -> Result<()> {
             keep_scaffold,
             log,
         }),
-        Some(Command::Build { build, platform }) => build_project::run(build_project::BuildArgs {
+        Some(Command::Build {
+            index,
             build,
             platform,
+            dry_run,
+        }) => pipeline::run_build(pipeline::BuildArgs {
+            index,
+            build,
+            platform,
+            dry_run,
             log,
         }),
-        Some(Command::Add { package }) => tooling::run_add(package, &log),
+        Some(Command::Init {
+            name,
+            identifier,
+            force,
+        }) => init::run(init::InitArgs {
+            name,
+            identifier,
+            force,
+            log,
+        }),
         None => pipeline::run(args),
     }
 }
