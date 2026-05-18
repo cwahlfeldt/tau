@@ -144,6 +144,14 @@ fn tauri_conf(cfg: &Config, frontend: &FrontendSource<'_>) -> Value {
     // `capabilities/default.json` and `capabilities/mobile.json`.
     // `withGlobalTauri` exposes both core APIs and the registered plugins at
     // `window.__TAURI__.*` for plain <script>-loaded code (no bundler required).
+    // `titleBarStyle: "Overlay"` extends the webview through the titlebar
+    // area (NSWindowStyleMaskFullSizeContentView under the hood) so the
+    // titlebar visually IS the app's content — same color, same chrome.
+    // `trafficLightPosition` insets the macOS window controls so they sit
+    // at a comfortable offset from the corner; users override via tauri
+    // config if they want a custom toolbar height. Drag-to-move is opt-in
+    // on the HTML side via the `data-tauri-drag-region` attribute on
+    // whatever top-of-window element acts as the titlebar.
     let mut window = json!({
         "label": "main",
         "title": cfg.name,
@@ -151,8 +159,9 @@ fn tauri_conf(cfg: &Config, frontend: &FrontendSource<'_>) -> Value {
         "height": 768,
         "resizable": true,
         "fullscreen": false,
-        "titleBarStyle": "Transparent",
-        "hiddenTitle": true
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "trafficLightPosition": { "x": 18.0, "y": 24.0 }
     });
     if let FrontendSource::Url { url, .. } = frontend {
         window["url"] = Value::String((*url).to_string());
@@ -205,6 +214,14 @@ fn default_capability(extra: &[String]) -> Value {
     // additional plugin permissions without forking the scaffold.
     let mut permissions: Vec<Value> = vec![
         "core:default".into(),
+        // `data-tauri-drag-region` (and the matching JS `startDragging()`
+        // API) only works if this permission is granted — `core:default`
+        // covers reads and title changes but not drag, so without this the
+        // titlebar drag region silently no-ops. Pairs with the Overlay
+        // titlebar style: the webview owns the titlebar area, the user
+        // marks some element draggable, and this is what lets that IPC
+        // call actually move the window.
+        "core:window:allow-start-dragging".into(),
         "fs:default".into(),
         "fs:allow-appdata-read-recursive".into(),
         "fs:allow-appdata-write-recursive".into(),
@@ -284,6 +301,7 @@ mod tests {
         // Core + each desktop-safe plugin's default set.
         for expected in [
             "core:default",
+            "core:window:allow-start-dragging",
             "fs:default",
             "fs:allow-appdata-read-recursive",
             "fs:allow-appdata-write-recursive",
@@ -398,6 +416,33 @@ mod tests {
         );
         assert_eq!(v["app"]["windows"][0]["url"], serde_json::json!("https://example.com"));
         assert_eq!(v["build"]["frontendDist"], serde_json::json!("/tmp/stub"));
+    }
+
+    #[test]
+    fn lib_template_injects_url_padding_chrome() {
+        // URL-wrapped apps can't add their own top padding, so the scaffold
+        // ships a Tauri plugin that injects it via `js_init_script`. The
+        // script must gate on macOS *and* on a non-Tauri-local origin,
+        // otherwise it would fight local-app CSS or add unwanted padding
+        // on Windows/Linux where Overlay is a no-op.
+        assert!(LIB_TMPL.contains("tau_chrome_plugin"));
+        assert!(LIB_TMPL.contains("js_init_script"));
+        assert!(LIB_TMPL.contains("tauri:"));
+        assert!(LIB_TMPL.contains("tauri.localhost"));
+        assert!(LIB_TMPL.contains("padding-top:44px"));
+    }
+
+    #[test]
+    fn tauri_conf_window_uses_overlay_titlebar() {
+        // Overlay (not Transparent) is the style that extends the webview
+        // *through* the titlebar so the app's own content paints the area
+        // behind the traffic lights — that's what makes the titlebar look
+        // "part of the app" with no separate strip. Switching to Transparent
+        // here would re-introduce a gap the webview doesn't cover.
+        let v = tauri_conf(&sample_cfg(), &FrontendSource::Local(Path::new("/tmp/src")));
+        assert_eq!(v["app"]["windows"][0]["titleBarStyle"], serde_json::json!("Overlay"));
+        assert_eq!(v["app"]["windows"][0]["hiddenTitle"], serde_json::json!(true));
+        assert!(v["app"]["windows"][0]["trafficLightPosition"].is_object());
     }
 
     #[test]

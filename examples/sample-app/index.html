@@ -7,15 +7,70 @@
     <link rel="icon" href="assets/favicon.png" />
     <style>
       body {
+        margin: 0;
+        padding-top: 44px;
         background: url("/assets/bg.png") repeat;
+      }
+      /* Draggable titlebar strip. Pinned to the top of the viewport so it
+         always covers the area under the traffic lights, even after
+         scrolling. A subtle background makes the click target visible so
+         it's obvious where to grab the window. `data-tauri-drag-region`
+         on this element tells Tauri's injected handler to call
+         `plugin:window|start_dragging` on mousedown (permission for which
+         is granted in capabilities/default.json). */
+      .titlebar {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        z-index: 1000;
+        height: 44px;
+        padding: 0 96px;
+        display: flex;
+        align-items: center;
+        font: 600 13px/1 -apple-system, system-ui, sans-serif;
+        color: rgba(0, 0, 0, 0.6);
+        background: rgba(255, 255, 255, 0.6);
+        backdrop-filter: blur(20px);
+        -webkit-backdrop-filter: blur(20px);
+        user-select: none;
+      }
+      main {
+        padding: 0 24px 24px;
       }
       .hero {
         background-image: url(assets/hero.png);
       }
     </style>
     <script src="https://cdn.example.com/external.js"></script>
+    <script>
+      // Hold Option (macOS) / Alt (Win/Linux) and click-drag anywhere on
+      // the window to move it. Bypasses Tauri's `data-tauri-drag-region`
+      // entirely — same `plugin:window|start_dragging` IPC under the hood,
+      // just gated on a modifier instead of a marked-up element.
+      //
+      // Requires `core:window:allow-start-dragging` in the app capability
+      // (granted by tau's default capability). Double-click variant calls
+      // `internal_toggle_maximize` so Alt + double-click maximizes/restores.
+      addEventListener("mousedown", (e) => {
+        if (!e.altKey || e.button !== 0) return;
+        const ipc = window.__TAURI_INTERNALS__;
+        if (!ipc) return;
+        e.preventDefault();
+        const cmd = e.detail === 2 ? "internal_toggle_maximize" : "start_dragging";
+        ipc.invoke("plugin:window|" + cmd);
+      });
+    </script>
   </head>
   <body>
+    <!-- `data-tauri-drag-region="deep"` makes the entire subtree draggable,
+         not just direct clicks on the div itself. Without "deep", clicking
+         the "Sample App" text (or any other child) targets that child and
+         the drag handler refuses to fire — see tauri/src/window/scripts/
+         drag.js. Interactive elements (buttons/links/inputs) inside the
+         region still block drag, which is exactly what you want. -->
+    <div class="titlebar" data-tauri-drag-region="deep">Sample App</div>
+    <main>
     <h1>ok, tau!</h1>
     <img src="/assets/logo.png" alt="logo" />
     <img srcset="assets/small.png 1x, /assets/large.png 2x" />
@@ -40,5 +95,6 @@
       });
     </script>
     <script src="js/app.js"></script>
+    </main>
   </body>
 </html>

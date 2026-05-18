@@ -1,6 +1,51 @@
+// Tauri plugin whose only job is to inject a CSS rule pushing remote-URL
+// content below the macOS traffic-light buttons.
+//
+// Context: when wrapping a remote URL (`tau https://example.com`), the user
+// doesn't control the page HTML, so they can't add their own top padding to
+// clear the traffic lights that float over the webview (titleBarStyle is
+// "Overlay" + trafficLightPosition is inset). We inject that padding here.
+//
+// The script self-gates twice:
+//   1. macOS only — `titleBarStyle: Overlay` is a no-op on Windows/Linux,
+//      so the system titlebar already sits above the webview there.
+//   2. Remote URL only — local apps load from `tauri://localhost` (or
+//      `http://tauri.localhost` on Windows), and the user can style their
+//      own HTML; injecting padding into local apps would fight their CSS.
+//
+// `js_init_script` fires before the page parses and re-fires on every
+// navigation, so SPA route changes and multi-page sites all get the rule.
+fn tau_chrome_plugin<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
+    const SCRIPT: &str = r#"
+        (function () {
+            if (!/Mac/i.test(navigator.userAgent)) return;
+            var loc = window.location;
+            if (loc.protocol === 'tauri:') return;
+            if (loc.hostname === 'tauri.localhost') return;
+            function apply() {
+                var s = document.createElement('style');
+                s.setAttribute('data-tau-chrome', '');
+                // 44px clears trafficLightPosition.y (24) + button height (~14)
+                // with a small buffer. Matches the local-app titlebar strip.
+                s.textContent = 'html{padding-top:44px!important;box-sizing:border-box}';
+                (document.head || document.documentElement).appendChild(s);
+            }
+            if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', apply, { once: true });
+            } else {
+                apply();
+            }
+        })();
+    "#;
+    tauri::plugin::Builder::new("tau-chrome")
+        .js_init_script(SCRIPT)
+        .build()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default()
+        .plugin(tau_chrome_plugin())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init());
