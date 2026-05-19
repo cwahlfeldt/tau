@@ -12,6 +12,8 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use walkdir::WalkDir;
 
+use crate::cli::CacheAction;
+
 /// Absolute path to the shared `CARGO_TARGET_DIR`. Created if missing.
 ///
 /// macOS:   `~/Library/Caches/tau/target`
@@ -150,6 +152,37 @@ pub fn clear(root: &Path) -> Result<()> {
     }
     std::fs::remove_dir_all(root)
         .with_context(|| format!("failed to clear cache dir {}", root.display()))
+}
+
+/// Handle `tau cache <action>`. Dispatched from `main.rs`.
+pub fn run_command(action: &CacheAction) -> Result<()> {
+    let dir = dir().context("could not resolve cache directory")?;
+    match action {
+        CacheAction::Size => {
+            let bytes = size_bytes(&dir)?;
+            println!("{}", dir.display());
+            println!("{}", format_size(bytes));
+        }
+        CacheAction::Clear => {
+            let bytes = size_bytes(&dir).unwrap_or(0);
+            clear(&dir)?;
+            println!("cleared {} ({})", dir.display(), format_size(bytes));
+        }
+        CacheAction::Prune { days, dry_run } => {
+            let max_age = std::time::Duration::from_secs(days.saturating_mul(60 * 60 * 24));
+            let report = prune(&dir, max_age, *dry_run)?;
+            let prefix = if report.dry_run { "would remove" } else { "removed" };
+            println!(
+                "{} {} files ({}) older than {} days from {}",
+                prefix,
+                report.files_removed,
+                format_size(report.bytes_freed),
+                days,
+                dir.display()
+            );
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

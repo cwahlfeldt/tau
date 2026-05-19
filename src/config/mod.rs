@@ -25,10 +25,10 @@ pub struct Overrides {
     pub release: bool,
 }
 
-pub(crate) const DEFAULT_NAME: &str = "WrappedApp";
-const DEFAULT_VERSION: &str = "0.1.0";
+pub const DEFAULT_NAME: &str = "WrappedApp";
+pub const DEFAULT_VERSION: &str = "0.1.0";
+pub const CONFIG_FILE: &str = "tau.conf.json";
 const DEFAULT_OUTPUT: &str = "./build";
-const DEFAULT_CONFIG_FILE: &str = "tau.conf.json";
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -42,7 +42,7 @@ pub struct Config {
     /// materializing the frontend tree the bundler embeds. Tauri's
     /// `frontendDist` walks the whole directory, so without this `.git`,
     /// `node_modules`, `build/` outputs, README files etc. all ship inside
-    /// the app. `default_excludes()` covers the most common footguns;
+    /// the app. `DEFAULT_EXCLUDES` covers the most common footguns;
     /// users add to it via `tau.conf.json`.
     pub exclude: Vec<String>,
     /// Extra Tauri capability permission identifiers appended to the default
@@ -59,20 +59,18 @@ pub struct Config {
 /// Patterns always excluded from the materialized frontend tree, regardless
 /// of user config. The user's `output` dir is added on top of these by
 /// `resolve()` (it's only known after config layering).
-pub fn default_excludes() -> Vec<String> {
-    vec![
-        ".git".into(),
-        ".git/**".into(),
-        ".gitignore".into(),
-        ".DS_Store".into(),
-        "**/.DS_Store".into(),
-        "node_modules".into(),
-        "node_modules/**".into(),
-        ".claude".into(),
-        ".claude/**".into(),
-        "tau.conf.json".into(),
-    ]
-}
+const DEFAULT_EXCLUDES: &[&str] = &[
+    ".git",
+    ".git/**",
+    ".gitignore",
+    ".DS_Store",
+    "**/.DS_Store",
+    "node_modules",
+    "node_modules/**",
+    ".claude",
+    ".claude/**",
+    "tau.conf.json",
+];
 
 /// Rust compile profile. Independent of bundle signing — an unsigned
 /// release build is valid (it's what you sideload locally), and signing
@@ -118,7 +116,7 @@ struct FileConfig {
     build: Option<BuildSection>,
     signing: Option<SigningConfig>,
     /// User-supplied glob patterns (relative to source root) that are
-    /// appended to `default_excludes()`.
+    /// appended to `DEFAULT_EXCLUDES`.
     exclude: Option<Vec<String>>,
     /// Extra Tauri capability permission identifiers appended to the
     /// default capability. Each entry is a permission string like
@@ -170,7 +168,7 @@ pub fn resolve(cwd: &Path, index_dir: Option<&Path>, overrides: &Overrides) -> R
     let profile = if overrides.release { BuildProfile::Release } else { BuildProfile::Debug };
     let signing = file.signing;
 
-    let mut exclude = default_excludes();
+    let mut exclude: Vec<String> = DEFAULT_EXCLUDES.iter().map(|s| (*s).to_string()).collect();
     // The user's output dir is one of the most common things to accidentally
     // re-embed (a previous build sitting next to index.html). Auto-exclude
     // it as a relative path; if `output` is absolute or escapes the source
@@ -236,19 +234,19 @@ fn load_file_config(
 ///    already standing in the app's directory).
 fn discover_config(cwd: &Path, index_dir: Option<&Path>) -> Option<PathBuf> {
     if let Some(dir) = index_dir {
-        let candidate = dir.join(DEFAULT_CONFIG_FILE);
+        let candidate = dir.join(CONFIG_FILE);
         if candidate.exists() {
             return Some(candidate);
         }
     }
-    let candidate = cwd.join(DEFAULT_CONFIG_FILE);
+    let candidate = cwd.join(CONFIG_FILE);
     if candidate.exists() {
         return Some(candidate);
     }
     None
 }
 
-pub(crate) fn default_identifier(name: &str) -> String {
+pub fn default_identifier(name: &str) -> String {
     let slug: String = name
         .chars()
         .filter(|c| c.is_ascii_alphanumeric())
@@ -282,12 +280,12 @@ mod tests {
         let app = tmp.path().join("app");
         std::fs::create_dir(&cwd).unwrap();
         std::fs::create_dir(&app).unwrap();
-        std::fs::write(cwd.join(DEFAULT_CONFIG_FILE), "{}").unwrap();
-        std::fs::write(app.join(DEFAULT_CONFIG_FILE), "{}").unwrap();
+        std::fs::write(cwd.join(CONFIG_FILE), "{}").unwrap();
+        std::fs::write(app.join(CONFIG_FILE), "{}").unwrap();
 
         assert_eq!(
             discover_config(&cwd, Some(&app)).unwrap(),
-            app.join(DEFAULT_CONFIG_FILE)
+            app.join(CONFIG_FILE)
         );
     }
 
@@ -298,11 +296,11 @@ mod tests {
         let app = tmp.path().join("app");
         std::fs::create_dir(&cwd).unwrap();
         std::fs::create_dir(&app).unwrap();
-        std::fs::write(cwd.join(DEFAULT_CONFIG_FILE), "{}").unwrap();
+        std::fs::write(cwd.join(CONFIG_FILE), "{}").unwrap();
 
         assert_eq!(
             discover_config(&cwd, Some(&app)).unwrap(),
-            cwd.join(DEFAULT_CONFIG_FILE)
+            cwd.join(CONFIG_FILE)
         );
     }
 

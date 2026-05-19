@@ -7,12 +7,8 @@
 use anyhow::{bail, Context, Result};
 use serde_json::json;
 
-use crate::config::default_identifier;
+use crate::config::{default_identifier, CONFIG_FILE, DEFAULT_NAME, DEFAULT_VERSION};
 use crate::log::Logger;
-
-const CONF_FILE: &str = "tau.conf.json";
-const DEFAULT_VERSION: &str = "0.1.0";
-const FALLBACK_NAME: &str = "WrappedApp";
 
 pub struct InitArgs {
     pub name: Option<String>,
@@ -25,13 +21,13 @@ pub fn run(args: InitArgs) -> Result<()> {
     let cwd = std::env::current_dir().context("could not determine current directory")?;
     write_conf(&cwd, &args)?;
     args.log.heading("tau init");
-    args.log.detail("wrote", &cwd.join(CONF_FILE).display().to_string());
+    args.log.detail("wrote", &cwd.join(CONFIG_FILE).display().to_string());
     args.log.done("Drop your built site here and run `tau .`");
     Ok(())
 }
 
 fn write_conf(cwd: &std::path::Path, args: &InitArgs) -> Result<()> {
-    let target = cwd.join(CONF_FILE);
+    let target = cwd.join(CONFIG_FILE);
     if target.exists() && !args.force {
         bail!(
             "{} already exists; pass --force to overwrite",
@@ -43,7 +39,7 @@ fn write_conf(cwd: &std::path::Path, args: &InitArgs) -> Result<()> {
         .name
         .clone()
         .or_else(|| cwd_dir_name(cwd))
-        .unwrap_or_else(|| FALLBACK_NAME.to_string());
+        .unwrap_or_else(|| DEFAULT_NAME.to_string());
     let identifier = args
         .identifier
         .clone()
@@ -95,7 +91,7 @@ mod tests {
         let args = quiet_args(None, None, false);
         write_conf(&dir, &args).unwrap();
 
-        let v = read(&dir.join(CONF_FILE));
+        let v = read(&dir.join(CONFIG_FILE));
         assert_eq!(v["name"], "my-cool-app");
         assert_eq!(v["identifier"], "com.tau.mycoolapp");
         assert_eq!(v["version"], DEFAULT_VERSION);
@@ -111,7 +107,7 @@ mod tests {
         );
         write_conf(tmp.path(), &args).unwrap();
 
-        let v = read(&tmp.path().join(CONF_FILE));
+        let v = read(&tmp.path().join(CONFIG_FILE));
         assert_eq!(v["name"], "My Game");
         assert_eq!(v["identifier"], "io.example.game");
     }
@@ -119,13 +115,13 @@ mod tests {
     #[test]
     fn refuses_to_overwrite_without_force() {
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(tmp.path().join(CONF_FILE), "existing").unwrap();
+        std::fs::write(tmp.path().join(CONFIG_FILE), "existing").unwrap();
         let args = quiet_args(None, None, false);
         let err = write_conf(tmp.path(), &args).unwrap_err();
         assert!(err.to_string().contains("--force"), "got: {}", err);
         // Existing file should be untouched.
         assert_eq!(
-            std::fs::read_to_string(tmp.path().join(CONF_FILE)).unwrap(),
+            std::fs::read_to_string(tmp.path().join(CONFIG_FILE)).unwrap(),
             "existing"
         );
     }
@@ -133,7 +129,7 @@ mod tests {
     #[test]
     fn overwrites_with_force() {
         let tmp = tempfile::tempdir().unwrap();
-        let target = tmp.path().join(CONF_FILE);
+        let target = tmp.path().join(CONFIG_FILE);
         std::fs::write(&target, "existing").unwrap();
         let args = quiet_args(Some("Replaced".to_string()), None, true);
         write_conf(tmp.path(), &args).unwrap();

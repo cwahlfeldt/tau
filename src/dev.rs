@@ -5,7 +5,7 @@
 //! Ctrl+C kills the whole process tree so nothing is left orphaned.
 
 use anyhow::{bail, Context, Result};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Child;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,9 +14,10 @@ use std::time::Duration;
 
 use crate::build::{ensure_targets, MobileFlavor, TauriCmd};
 use crate::cache;
-use crate::config::{self, Overrides, Platform};
+use crate::config::{Overrides, Platform};
 use crate::input::Input;
 use crate::log::Logger;
+use crate::pipeline;
 use crate::scaffold;
 
 pub struct DevArgs {
@@ -45,26 +46,24 @@ impl DevArgs {
 pub fn run(args: DevArgs) -> Result<()> {
     let platform = resolve_platform(args.platform.as_deref())?;
     let log = &args.log;
-    let raw = args
-        .index
-        .to_str()
-        .context("index argument is not valid UTF-8")?;
-    let input = Input::parse(raw)?;
 
     let overrides = args.overrides(platform);
-    let cwd = std::env::current_dir()?;
-    let index_dir = match &input {
-        Input::File { source_root, .. } => Some(source_root.as_path()),
-        Input::Url(_) => None,
-    };
-    let mut cfg = config::resolve(&cwd, index_dir, &overrides)?;
+    let (input, mut cfg) = pipeline::resolve_inputs(&args.index, &overrides)?;
+    // `resolve()` already produces this single-platform list from the
+    // overrides above, but pin it explicitly so any future change to
+    // `resolve_platforms` can't silently widen dev to multiple targets.
     cfg.platforms = vec![platform];
 
     log.heading("tau dev");
     log.detail("source", &input.label());
-    log_header(log, &cfg, platform);
+    log.detail("app", &cfg.name);
+    log.detail("identifier", &cfg.identifier);
+    log.detail("platform", platform.as_str());
 
-    let workdir = make_workdir("tau-dev-")?;
+    let workdir = tempfile::Builder::new()
+        .prefix("tau-dev-")
+        .tempdir()
+        .context("failed to create temp working directory")?;
     let project_dir = workdir.path().to_path_buf();
 
     match &input {
@@ -82,33 +81,12 @@ pub fn run(args: DevArgs) -> Result<()> {
     log.detail("cache", &target_dir.display().to_string());
 
     let shutdown = install_shutdown_flag();
-    let status = spawn_and_wait_tauri_dev(&project_dir, &target_dir, platform, &shutdown, log)?;
+    let status = run_tauri_dev(&project_dir, &target_dir, platform, &shutdown, log)?;
 
-    finalize(workdir, args.keep_scaffold, log);
-    check_status(status)
-}
-
-fn log_header(log: &Logger, cfg: &config::Config, platform: Platform) {
-    log.detail("app", &cfg.name);
-    log.detail("identifier", &cfg.identifier);
-    log.detail("platform", platform.as_str());
-}
-
-fn make_workdir(prefix: &str) -> Result<tempfile::TempDir> {
-    tempfile::Builder::new()
-        .prefix(prefix)
-        .tempdir()
-        .context("failed to create temp working directory")
-}
-
-fn finalize(workdir: tempfile::TempDir, keep_scaffold: bool, log: &Logger) {
-    if keep_scaffold {
+    if args.keep_scaffold {
         let kept = workdir.keep();
         log.done(&format!("Scaffold preserved at {}", kept.display()));
     }
-}
-
-fn check_status(status: Option<std::process::ExitStatus>) -> Result<()> {
     match status {
         Some(s) if !s.success() => bail!("cargo tauri dev exited with status {}", s),
         _ => Ok(()),
@@ -133,9 +111,9 @@ fn install_shutdown_flag() -> Arc<AtomicBool> {
 /// Spawn `cargo tauri dev` (or its mobile equivalent) and poll the child
 /// alongside the Ctrl+C flag. Returns the exit status, or `None` if we
 /// killed the child ourselves on shutdown.
-fn spawn_and_wait_tauri_dev(
-    scaffold_dir: &Path,
-    target_dir: &Path,
+fn run_tauri_dev(
+    scaffold_dir: &std::path::Path,
+    target_dir: &std::path::Path,
     platform: Platform,
     shutdown: &Arc<AtomicBool>,
     log: &Logger,

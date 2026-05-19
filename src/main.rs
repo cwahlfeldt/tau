@@ -11,17 +11,17 @@ mod pipeline;
 mod scaffold;
 mod signing;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Result};
 use clap::Parser;
 
-use crate::cli::{CacheAction, Cli, Command};
+use crate::cli::{Cli, Command};
 use crate::log::Logger;
 
 fn main() -> Result<()> {
     let args = Cli::parse();
     let log = Logger::new(args.common.level());
     match args.command {
-        Some(Command::Cache { action }) => run_cache(&action),
+        Some(Command::Cache { action }) => cache::run_command(&action),
         Some(Command::Dev {
             index,
             platform,
@@ -43,53 +43,23 @@ fn main() -> Result<()> {
             build,
             platform,
             dry_run,
-        }) => pipeline::run_build(pipeline::BuildArgs {
-            index,
-            build,
-            platform,
-            dry_run,
-            log,
-        }),
+        }) => pipeline::run(pipeline::BuildArgs { index, build, platform, dry_run, log }),
         Some(Command::Init {
             name,
             identifier,
             force,
-        }) => init::run(init::InitArgs {
-            name,
-            identifier,
-            force,
-            log,
-        }),
-        None => pipeline::run(args),
-    }
-}
-
-fn run_cache(action: &CacheAction) -> Result<()> {
-    let dir = cache::dir().context("could not resolve cache directory")?;
-    match action {
-        CacheAction::Size => {
-            let bytes = cache::size_bytes(&dir)?;
-            println!("{}", dir.display());
-            println!("{}", cache::format_size(bytes));
-        }
-        CacheAction::Clear => {
-            let bytes = cache::size_bytes(&dir).unwrap_or(0);
-            cache::clear(&dir)?;
-            println!("cleared {} ({})", dir.display(), cache::format_size(bytes));
-        }
-        CacheAction::Prune { days, dry_run } => {
-            let max_age = std::time::Duration::from_secs(days.saturating_mul(60 * 60 * 24));
-            let report = cache::prune(&dir, max_age, *dry_run)?;
-            let prefix = if report.dry_run { "would remove" } else { "removed" };
-            println!(
-                "{} {} files ({}) older than {} days from {}",
-                prefix,
-                report.files_removed,
-                cache::format_size(report.bytes_freed),
-                days,
-                dir.display()
-            );
+        }) => init::run(init::InitArgs { name, identifier, force, log }),
+        None => {
+            let index = args
+                .index
+                .ok_or_else(|| anyhow!("an index.html path or URL is required"))?;
+            pipeline::run(pipeline::BuildArgs {
+                index,
+                build: args.build,
+                platform: args.platform,
+                dry_run: args.dry_run,
+                log,
+            })
         }
     }
-    Ok(())
 }

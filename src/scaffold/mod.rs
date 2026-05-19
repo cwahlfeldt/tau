@@ -114,11 +114,11 @@ fn write_src_tauri(layout: &Layout, cfg: &Config, frontend: FrontendSource<'_>) 
     Ok(())
 }
 
-pub(crate) fn write_text(path: &Path, contents: &str) -> Result<()> {
+fn write_text(path: &Path, contents: &str) -> Result<()> {
     std::fs::write(path, contents).with_context(|| format!("write {}", path.display()))
 }
 
-pub(crate) fn write_bytes(path: &Path, contents: &[u8]) -> Result<()> {
+fn write_bytes(path: &Path, contents: &[u8]) -> Result<()> {
     std::fs::write(path, contents).with_context(|| format!("write {}", path.display()))
 }
 
@@ -130,7 +130,7 @@ fn write_json(path: &Path, value: &Value) -> Result<()> {
 
 /// Minimal `{key}` substitution. We don't need a real template engine and a
 /// dependency-free helper keeps the JSON/Toml templates readable.
-pub(crate) fn render(template: &str, vars: &[(&str, &str)]) -> String {
+fn render(template: &str, vars: &[(&str, &str)]) -> String {
     let mut out = template.to_string();
     for (k, v) in vars {
         out = out.replace(&format!("{{{}}}", k), v);
